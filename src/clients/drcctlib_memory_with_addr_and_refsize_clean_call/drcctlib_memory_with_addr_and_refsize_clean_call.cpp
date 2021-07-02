@@ -11,6 +11,7 @@
 #include "drreg.h"
 #include "drutil.h"
 #include "drcctlib.h"
+#include "shadow_memory.h"
 
 #define DRCCTLIB_PRINTF(_FORMAT, _ARGS...) \
     DRCCTLIB_PRINTF_TEMPLATE("memory_with_addr_and_refsize_clean_call", _FORMAT, ##_ARGS)
@@ -19,6 +20,7 @@
                                           ##_ARGS)
 
 static int tls_idx;
+static file_t gTraceFile;
 
 enum {
     INSTRACE_TLS_OFFS_BUF_PTR,
@@ -47,23 +49,68 @@ typedef struct _per_thread_t {
 
 #define TLS_MEM_REF_BUFF_SIZE 100
 
+void
+Record1ByteMemRead(void *addr){
+     //dr_fprintf(gTraceFile, "In Record1ByteMemRead\n");
+     size_t address;
+     address = (size_t) addr;
+     //int8_t *status = GetShadowBaseAddress(addr);
+}
+
 // client want to do
 void
-DoWhatClientWantTodo(void *drcontext, context_handle_t cur_ctxt_hndl, mem_ref_t *ref)
+DoWhatClientWantTodo(void *drcontext, context_handle_t cur_ctxt_hndl, mem_ref_t *ref, int32_t op)
 {
     // add online analysis here
+    //dr_fprintf(gTraceFile, "Do What Here\n");
+    void *addr = ref->addr;
+    int size = ref->size;
+    //dr_fprintf(gTraceFile, "size is %d\n", size);
+    if (op == 1){
+        dr_fprintf(gTraceFile, "addr is %p\n", addr);
+        dr_fprintf(gTraceFile, "op is %d\n", op);}
+
+    switch (size){
+    case 1:{
+        //dr_fprintf(gTraceFile, "case 1\n");
+	//if (op == 0):
+	    //Record1ByteMemRead(addr);
+        //if (op == 1):
+	    //Record1ByteMemWrite(addr);
+	}
+    case 2:
+        //dr_fprintf(gTraceFile, "case 2\n");
+    case 4:
+        //dr_fprintf(gTraceFile, "case 4\n");
+    case 8:
+        //dr_fprintf(gTraceFile, "case 8\n");
+    
+    case 10:
+        dr_fprintf(gTraceFile, "case 10\n");
+	if (op == 0){
+	    Record1ByteMemRead(addr);
+        }
+
+    case 16:
+        //dr_fprintf(gTraceFile, "case 16\n");
+    default:
+        //dr_fprintf(gTraceFile, "default\n");
+        break;
+    }
+
     
 }
+
 // dr clean call
 void
-InsertCleancall(int32_t slot,int32_t num)
+InsertCleancall(int32_t slot, int32_t num, int32_t op)
 {
     void *drcontext = dr_get_current_drcontext();
     per_thread_t *pt = (per_thread_t *)drmgr_get_tls_field(drcontext, tls_idx);
     context_handle_t cur_ctxt_hndl = drcctlib_get_context_handle(drcontext, slot);
     for (int i = 0; i < num; i++) {
         if (pt->cur_buf_list[i].addr != 0) {
-            DoWhatClientWantTodo(drcontext, cur_ctxt_hndl, &pt->cur_buf_list[i]);
+            DoWhatClientWantTodo(drcontext, cur_ctxt_hndl, &pt->cur_buf_list[i], op);
         }
     }
     BUF_PTR(pt->cur_buf, mem_ref_t, INSTRACE_TLS_OFFS_BUF_PTR) = pt->cur_buf_list;
@@ -140,20 +187,24 @@ InstrumentInsCallback(void *drcontext, instr_instrument_msg_t *instrument_msg)
     instr_t *instr = instrument_msg->instr;
     int32_t slot = instrument_msg->slot;
     int num = 0;
+    int op = 0; // read is 0, write is 1
     for (int i = 0; i < instr_num_srcs(instr); i++) {
         if (opnd_is_memory_reference(instr_get_src(instr, i))) {
             num++;
             InstrumentMem(drcontext, bb, instr, instr_get_src(instr, i));
         }
     }
+    dr_insert_clean_call(drcontext, bb, instr, (void *)InsertCleancall, false, 3,
+                         OPND_CREATE_CCT_INT(slot), OPND_CREATE_CCT_INT(num), OPND_CREATE_CCT_INT(op));
     for (int i = 0; i < instr_num_dsts(instr); i++) {
         if (opnd_is_memory_reference(instr_get_dst(instr, i))) {
             num++;
+	    op = 1;
             InstrumentMem(drcontext, bb, instr, instr_get_dst(instr, i));
         }
     }
-    dr_insert_clean_call(drcontext, bb, instr, (void *)InsertCleancall, false, 2,
-                         OPND_CREATE_CCT_INT(slot), OPND_CREATE_CCT_INT(num));
+    dr_insert_clean_call(drcontext, bb, instr, (void *)InsertCleancall, false, 3,
+                         OPND_CREATE_CCT_INT(slot), OPND_CREATE_CCT_INT(num), OPND_CREATE_CCT_INT(op));
 }
 
 static void
@@ -182,7 +233,14 @@ ClientThreadEnd(void *drcontext)
 static void
 ClientInit(int argc, const char *argv[])
 {
+    char name[MAXIMUM_PATH] = "";
+    DRCCTLIB_INIT_LOG_FILE_NAME(name, "test", "out");
+    DRCCTLIB_PRINTF("Creating log file at:%s", name);
     
+    gTraceFile = dr_open_file(name, DR_FILE_WRITE_OVERWRITE | DR_FILE_ALLOW_LARGE);
+    DR_ASSERT(gTraceFile != INVALID_FILE);
+    
+    dr_fprintf(gTraceFile, "jtan: addr and refsize\n");   
 }
 
 static void

@@ -1,12 +1,12 @@
 #include<iostream>
 using namespace std;
 int main(){
-    for (int i = 0; i < 10000; i++){
-        int a = 100;
-	int b = 100;
-	a = a + 1;
-        b = 200;
-        //cout << "Test" << endl;
+    int l = 10;
+    int *array = (int *) malloc(l*sizeof(int));
+    //printf("%p %p\n", array, array+l);
+    for (int i = 0; i < l; i++){
+        array[i] = i;
+        printf("%p\n", array + i);
     }
     return 0;
 }
