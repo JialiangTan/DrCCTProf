@@ -5,6 +5,12 @@
  */
 
 #include <cstddef>
+#include <unordered_map>
+// Need GOOGLE sparse hash tables
+//#include <google/sparse_hash_map>
+//#include <google/dense_hash_map>
+//using google::sparse_hash_map;      // namespace where class lives by default
+//using google::dense_hash_map;      // namespace where class lives by default
 
 #include "dr_api.h"
 #include "drmgr.h"
@@ -47,14 +53,139 @@ typedef struct _per_thread_t {
     void *cur_buf;
 } per_thread_t;
 
+typedef struct DeadInfo {
+    void* firstIP;
+    void* secondIP;
+    uint64_t count;
+} DeadInfo;
+
+// ensures CONTINUOUS_DEADINFO
+#define CONTINUOUS_DEADINFO
+
+#if defined(CONTINUOUS_DEADINFO)
+unordered_map<uint64_t, uint64_t> DeadMap;
+unordered_map<uint64_t, uint64_t>::iterator gDeadMapIt;
+//dense_hash_map<uint64_t, uint64_t> DeadMap;
+//dense_hash_map<uint64_t, uint64_t>::iterator gDeadMapIt;
+//sparse_hash_map<uint64_t, uint64_t> DeadMap;
+//sparse_hash_map<uint64_t, uint64_t>::iterator gDeadMapIt;
+#else // no defined(CONTINUOUS_DEADINFO)
+//unordered_map<uint64_t, DeadInfo> DeadMap;
+//unordered_map<uint64_t, DeadInfo>::iterator gDeadMapIt;
+//dense_hash_map<uint64_t, DeadInfo> DeadMap;
+//dense_hash_map<uint64_t, DeadInfo>::iterator gDeadMapIt;
+#endif //end defined(CONTINUOUS_DEADINFO) 
+
+
 #define TLS_MEM_REF_BUFF_SIZE 100
+
+#define ONE_BYTE_READ_ACTION (0)
+#define TWO_BYTE_READ_ACTION (0)
+#define FOUR_BYTE_READ_ACTION (0)
+#define EIGHT_BYTE_READ_ACTION (0)
+
+#define ONE_BYTE_WRITE_ACTION (0xff)
+#define TWO_BYTE_WRITE_ACTION (0xffff)
+#define FOUR_BYTE_WRITE_ACTION (0xffffffff)
+#define EIGHT_BYTE_WRITE_ACTION (0xffffffffffffffff)
+
+
+
+
+// make 64bit hash from 2 32bit deltas from
+// remove lower 3 bits so that when we need more than 4 GB HASH still continues to work
+
+#if 0
+#define CONTEXT_HASH_128BITS_TO_64BITS(curCtxt, oldCtxt, hashVar)  \
+{\
+uint64_t key = (uint64_t) (((void**)oldCtxt) - gPreAllocatedContextBuffer); \
+hashVar = key << 32;\
+key = (uint64_t) (((void**)curCtxt) - gPreAllocatedContextBuffer); \
+hashVar |= key;\
+}
+#else
+#define CONTEXT_HASH_128BITS_TO_64BITS(curCtxt, oldCtxt, hashVar)  \
+{\
+uint64_t key = (uint64_t) (oldCtxt); \
+hashVar = key << 32;\
+key = (uint64_t) (curCtxt); \
+hashVar |= key;\
+}
+#endif
+
+
+
+#define OLD_CTXT (*lastIP)
+
+#if defined(CONTINUOUS_DEADINFO)
+#define DECLARE_HASHVAR(name) uint64_t name
+
+#define REPORT_DEAD(curCtxt, lastCtxt, hashVar, size) do { \
+CONTEXT_HASH_128BITS_TO_64BITS(curCtxt, lastCtxt, hashVar)  \
+if ((gDeadMapIt = DeadMap.find(hashVar))  == DeadMap.end()) {    \
+DeadMap.insert(std::pair<uint64_t, uint64_t>(hashVar, size)); \
+} else {    \
+(gDeadMapIt->second) += size;    \
+}   \
+}while(0)
+
+#else // no defined(CONTINUOUS_DEADINFO)
+#define DECLARE_HASHVAR(name) uint64_t name
+
+#define REPORT_DEAD(curCtxt, lastCtxt, hashVar, size) do { \
+CONTEXT_HASH_128BITS_TO_64BITS(curCtxt, lastCtxt, hashVar)  \
+if ( (gDeadMapIt = DeadMap.find(hashVar))  == DeadMap.end()) {    \
+DeadInfo deadInfo = { lastCtxt,  curCtxt, size };   \
+DeadMap.insert(std::pair<uint64_t, DeadInfo>(hashVar, deadInfo)); \
+} else {    \
+(gDeadMapIt->second.count) += size;    \
+}   \
+}while(0)
+
+#endif // end defined(CONTINUOUS_DEADINFO)
+
+
+
+ConcurrentShadowMemory<uint8_t> shadow_mem;
+
 
 void
 Record1ByteMemRead(void *addr){
-     //dr_fprintf(gTraceFile, "In Record1ByteMemRead\n");
-     size_t address;
-     address = (size_t) addr;
-     //int8_t *status = GetShadowBaseAddress(addr);
+    size_t address;
+    address = (size_t) addr;
+    uint8_t *status = shadow_mem.GetShadowBaseAddress(address);
+    //dr_fprintf(gTraceFile, "addr: %p\n", addr);
+    //dr_fprintf(gTraceFile, "address: %p\n", address);
+     
+    // status == 0 if not created
+    if (status){
+        // NOT NEEDED status->lastIP = ip;
+	*(status + PAGE_OFFSET((uint64_t)addr))  = ONE_BYTE_READ_ACTION;
+    }
+}
+
+void
+Record1ByteMemWrite(void *addr, context_handle_t cur_ctxt_hndl){
+    //dr_fprintf(gTraceFile, "Run Record1ByteMemWrite\n");
+    size_t address;
+    address = (size_t) addr;
+    uint8_t *status = shadow_mem.GetOrCreateShadowBaseAddress(address);
+    uint32_t *lastIP = (uint32_t *)(status + SHADOW_PAGE_SIZE + PAGE_OFFSET((uint64_t)address) * sizeof(uint32_t));
+    //dr_fprintf(gTraceFile, "Check Here\n");
+    //dr_fprintf(gTraceFile, "address:%p, status+:%p\n", address, (status + PAGE_OFFSET((uint64_t)address)));
+
+    if (*(status + PAGE_OFFSET((uint64_t)address)) == ONE_BYTE_WRITE_ACTION){
+        //jtan
+        dr_fprintf(gTraceFile, "if\n");
+	//DECLARE_HASHVAR(myhash);
+	//REPORT_DEAD(cur_ctxt_hndl, OLD_CTXT, myhash, 1);
+
+    }
+    else{
+        dr_fprintf(gTraceFile, "else\n");
+	*(status +  PAGE_OFFSET((uint64_t)address)) = ONE_BYTE_WRITE_ACTION;
+    }
+    *lastIP = cur_ctxt_hndl;
 }
 
 // client want to do
@@ -62,22 +193,22 @@ void
 DoWhatClientWantTodo(void *drcontext, context_handle_t cur_ctxt_hndl, mem_ref_t *ref, int32_t op)
 {
     // add online analysis here
-    //dr_fprintf(gTraceFile, "Do What Here\n");
     void *addr = ref->addr;
     int size = ref->size;
     //dr_fprintf(gTraceFile, "size is %d\n", size);
-    if (op == 1){
-        dr_fprintf(gTraceFile, "addr is %p\n", addr);
-        dr_fprintf(gTraceFile, "op is %d\n", op);}
+    //if (op == 1){
+        //dr_fprintf(gTraceFile, "addr is %p\n", addr);
+        //dr_fprintf(gTraceFile, "op is %d\n", op);}
 
     switch (size){
     case 1:{
-        //dr_fprintf(gTraceFile, "case 1\n");
-	//if (op == 0):
-	    //Record1ByteMemRead(addr);
-        //if (op == 1):
-	    //Record1ByteMemWrite(addr);
+	if (op == 0){
+	    Record1ByteMemRead(addr);
 	}
+        if (op == 1){
+	    Record1ByteMemWrite(addr, cur_ctxt_hndl);
+	}
+    }
     case 2:
         //dr_fprintf(gTraceFile, "case 2\n");
     case 4:
@@ -86,18 +217,18 @@ DoWhatClientWantTodo(void *drcontext, context_handle_t cur_ctxt_hndl, mem_ref_t 
         //dr_fprintf(gTraceFile, "case 8\n");
     
     case 10:
-        dr_fprintf(gTraceFile, "case 10\n");
-	if (op == 0){
-	    Record1ByteMemRead(addr);
-        }
+        //dr_fprintf(gTraceFile, "case 10\n");
+	//if (op == 0){
+	    //Record1ByteMemRead(addr);
+        //}
 
     case 16:
         //dr_fprintf(gTraceFile, "case 16\n");
     default:
         //dr_fprintf(gTraceFile, "default\n");
         break;
-    }
-
+    
+    }//switch
     
 }
 
