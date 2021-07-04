@@ -59,6 +59,7 @@ typedef struct DeadInfo {
     uint64_t count;
 } DeadInfo;
 
+
 // ensures CONTINUOUS_DEADINFO
 #define CONTINUOUS_DEADINFO
 
@@ -117,6 +118,8 @@ hashVar |= key;\
 
 #define OLD_CTXT (*lastIP)
 
+
+
 #if defined(CONTINUOUS_DEADINFO)
 #define DECLARE_HASHVAR(name) uint64_t name
 
@@ -148,6 +151,61 @@ DeadMap.insert(std::pair<uint64_t, DeadInfo>(hashVar, deadInfo)); \
 
 ConcurrentShadowMemory<uint8_t> shadow_mem;
 
+/*
+// make 64bit hash from 2 32bit deltas from
+// remove lower 3 bits so that when we need more than 4 GB HASH still continues to work
+# if 0
+ContextHash128To64(context_handle_t cur_ctxt_hndl, uint32_t oldCtxt, uint64_t hashVar) {
+    uint64_t key = (uint64_t) (((void**)oldCtxt) - gPreAllocatedContextBuffer);
+    hashVar = key << 32;
+    key = (uint64_t) (((void**)curCtxt) - gPreAllocatedContextBuffer);
+    hashVar |= key;
+}
+
+# else
+ContextHash128To64(context_handle_t cur_ctxt_hndl, uint32_t oldCtxt, uint64_t hashVar) {
+    uint64_t key = (uint64_t) (oldCtxt);
+    hashVar = key << 32;
+    key = (uint64_t) (cur_ctxt_hndl); //curCtxt
+    hashVar |= key;
+}
+#endif 
+*/
+
+#define DECLARE_HASHVAR(name) uint64_t name
+
+# if defined(CONTINUOUS_DEADINFO)
+void
+ReportDead(context_handle_t cur_ctxt_hndl, uint32_t lastCtxt, uint64_t size){
+    DECLARE_HASHVAR(hashVar);
+    do {
+        CONTEXT_HASH_128BITS_TO_64BITS(cur_ctxt_hndl, lastCtxt, hashVar);
+	// do something
+        if ((gDeadMapIt = DeadMap.find(hashVar)) == DeadMap.end()) {
+            DeadMap.insert(std::pair<uint64_t, uint64_t>(hashVar,size));
+        }
+        else {
+            (gDeadMapIt->second) += size;
+        }   
+    } while(0); 
+}
+
+# else // no defined(CONTINUOUS_DEADINFO)
+void
+ReportDead(context_handle_t cur_ctxt_hndl, uint32_t lastCtxt, uint64_t hashVar, uint64_t size){
+    do {
+        CONTEXT_HASH_128BITS_TO_64BITS(curCtxt, lastCtxt,hashVar);
+        if ( (gDeadMapIt = DeadMap.find(hashVar))  == DeadMap.end()) {
+	    DeadInfo deadInfo = { lastCtxt,  curCtxt, size };
+	    DeadMap.insert(std::pair<uint64_t, DeadInfo>(hashVar,deadInfo));
+	}
+	else {
+	    (gDeadMapIt->second.count) += size;
+	}
+    } while(0);
+}
+# endif
+
 
 void
 Record1ByteMemRead(void *addr){
@@ -178,7 +236,12 @@ Record1ByteMemWrite(void *addr, context_handle_t cur_ctxt_hndl){
         //jtan
         dr_fprintf(gTraceFile, "if\n");
 	//DECLARE_HASHVAR(myhash);
+	//uint64_t myhash;
 	//REPORT_DEAD(cur_ctxt_hndl, OLD_CTXT, myhash, 1);
+	
+	//uint64_t myhash;
+	//DECLARE_HASHVAR(myhash);
+	ReportDead(cur_ctxt_hndl, OLD_CTXT, 1);
 
     }
     else{
@@ -186,6 +249,18 @@ Record1ByteMemWrite(void *addr, context_handle_t cur_ctxt_hndl){
 	*(status +  PAGE_OFFSET((uint64_t)address)) = ONE_BYTE_WRITE_ACTION;
     }
     *lastIP = cur_ctxt_hndl;
+}
+
+
+void
+Record2BytesMemRead(void *addr){
+
+}
+
+
+void
+Record2BytesMemWrite(void *addr, context_handle_t cur_ctxt_hndl) {
+
 }
 
 // client want to do
@@ -209,8 +284,15 @@ DoWhatClientWantTodo(void *drcontext, context_handle_t cur_ctxt_hndl, mem_ref_t 
 	    Record1ByteMemWrite(addr, cur_ctxt_hndl);
 	}
     }
-    case 2:
+    case 2:{
         //dr_fprintf(gTraceFile, "case 2\n");
+        if (op == 0){
+	    Record2BytesMemRead(addr);
+	}
+	if (op == 1) {
+	    Record2BytesMemWrite(addr, cur_ctxt_hndl);
+	}
+    }
     case 4:
         //dr_fprintf(gTraceFile, "case 4\n");
     case 8:
