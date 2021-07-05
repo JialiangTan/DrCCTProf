@@ -271,7 +271,7 @@ Record2ByteMemRead(void *addr){
 	}
     }
     else {
-        dr_fprintf(gTraceFile, "else\n");
+        //dr_fprintf(gTraceFile, "else\n");
         if (status) {
 	    *(status + PAGE_OFFSET_MASK) = ONE_BYTE_READ_ACTION;
 	}
@@ -495,7 +495,8 @@ DoWhatClientWantTodo(void *drcontext, context_handle_t cur_ctxt_hndl, mem_ref_t 
     }
     case 4:{
         if (op == 0) {
-	    //Record4ByteMemRead(addr);
+	    Record4ByteMemRead(addr);
+            dr_fprintf(gTraceFile, "Dump Here\n");
 	}
 	if (op == 1) {
 	    //Record4ByteMemWrite(addr, cur_ctxt_hndl);
@@ -610,6 +611,14 @@ InstrumentInsCallback(void *drcontext, instr_instrument_msg_t *instrument_msg)
     instrlist_t *bb = instrument_msg->bb;
     instr_t *instr = instrument_msg->instr;
     int32_t slot = instrument_msg->slot;
+
+#ifdef x86_CCTLIB
+    if (drreg_reserve_aflags(drcontext, bb, instr) != DRREG_SUCCESS) {
+        DRCCTLIB_EXIT_PROCESS("instrument_before_every_instr_meta_instr "
+	                      "drreg_reserve_aflags != DRREG_SUCCESS");
+    }
+#endif
+
     int num = 0;
     int op = 0; // read is 0, write is 1
     for (int i = 0; i < instr_num_srcs(instr); i++) {
@@ -627,6 +636,13 @@ InstrumentInsCallback(void *drcontext, instr_instrument_msg_t *instrument_msg)
             InstrumentMem(drcontext, bb, instr, instr_get_dst(instr, i));
         }
     }
+
+#ifdef x86_CCTLIB
+    if (drreg_unreserve_aflags(drcontext, bb, instr) != DRREG_SUCCESS) {
+         DRCCTLIB_EXIT_PROCESS("drreg_unreserve_aflags != DRREG_SUCCESS");
+    }
+#endif
+
     dr_insert_clean_call(drcontext, bb, instr, (void *)InsertCleancall, false, 3,
                          OPND_CREATE_CCT_INT(slot), OPND_CREATE_CCT_INT(num), OPND_CREATE_CCT_INT(op));
 }
