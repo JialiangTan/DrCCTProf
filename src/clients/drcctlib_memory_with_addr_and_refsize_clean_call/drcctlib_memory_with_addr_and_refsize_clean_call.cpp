@@ -148,6 +148,10 @@ DeadMap.insert(std::pair<uint64_t, DeadInfo>(hashVar, deadInfo)); \
 #endif // end defined(CONTINUOUS_DEADINFO)
 
 
+#define REPORT_IF_DEAD(mask, curCtxt, lastCtxt, hashVar) do {if (state & (mask)){ \
+REPORT_DEAD(curCtxt, lastCtxt, hashVar, 1);\
+}}while(0)
+
 
 ConcurrentShadowMemory<uint8_t> shadow_mem;
 
@@ -172,9 +176,9 @@ ContextHash128To64(context_handle_t cur_ctxt_hndl, uint32_t oldCtxt, uint64_t ha
 #endif 
 */
 
-#define DECLARE_HASHVAR(name) uint64_t name
 
 # if defined(CONTINUOUS_DEADINFO)
+#define DECLARE_HASHVAR(name) uint64_t name
 void
 ReportDead(context_handle_t cur_ctxt_hndl, uint32_t lastCtxt, uint64_t size){
     DECLARE_HASHVAR(hashVar);
@@ -191,6 +195,7 @@ ReportDead(context_handle_t cur_ctxt_hndl, uint32_t lastCtxt, uint64_t size){
 }
 
 # else // no defined(CONTINUOUS_DEADINFO)
+#define DECLARE_HASHVAR(name) uint64_t name
 void
 ReportDead(context_handle_t cur_ctxt_hndl, uint32_t lastCtxt, uint64_t hashVar, uint64_t size){
     do {
@@ -212,56 +217,252 @@ Record1ByteMemRead(void *addr){
     size_t address;
     address = (size_t) addr;
     uint8_t *status = shadow_mem.GetShadowBaseAddress(address);
-    //dr_fprintf(gTraceFile, "addr: %p\n", addr);
-    //dr_fprintf(gTraceFile, "address: %p\n", address);
+    //dr_fprintf(gTraceFile, "status %p\n", status);
+    //dr_fprintf(gTraceFile, "address:%p, status+:%p\n", address, (status + PAGE_OFFSET((uint64_t)address)));
      
     // status == 0 if not created
     if (status){
         // NOT NEEDED status->lastIP = ip;
-	*(status + PAGE_OFFSET((uint64_t)addr))  = ONE_BYTE_READ_ACTION;
+	*(status + PAGE_OFFSET((uint64_t)address))  = ONE_BYTE_READ_ACTION;
     }
 }
 
 void
 Record1ByteMemWrite(void *addr, context_handle_t cur_ctxt_hndl){
-    //dr_fprintf(gTraceFile, "Run Record1ByteMemWrite\n");
     size_t address;
     address = (size_t) addr;
     uint8_t *status = shadow_mem.GetOrCreateShadowBaseAddress(address);
     uint32_t *lastIP = (uint32_t *)(status + SHADOW_PAGE_SIZE + PAGE_OFFSET((uint64_t)address) * sizeof(uint32_t));
-    //dr_fprintf(gTraceFile, "Check Here\n");
     //dr_fprintf(gTraceFile, "address:%p, status+:%p\n", address, (status + PAGE_OFFSET((uint64_t)address)));
 
     if (*(status + PAGE_OFFSET((uint64_t)address)) == ONE_BYTE_WRITE_ACTION){
-        //jtan
-        dr_fprintf(gTraceFile, "if\n");
-	//DECLARE_HASHVAR(myhash);
+        //dr_fprintf(gTraceFile, "if\n");
+	DECLARE_HASHVAR(myhash);
 	//uint64_t myhash;
-	//REPORT_DEAD(cur_ctxt_hndl, OLD_CTXT, myhash, 1);
+	REPORT_DEAD(cur_ctxt_hndl, OLD_CTXT, myhash, 1);
+        //dr_fprintf(gTraceFile, "Hash Value: %d\n", myhash);
 	
 	//uint64_t myhash;
 	//DECLARE_HASHVAR(myhash);
-	ReportDead(cur_ctxt_hndl, OLD_CTXT, 1);
+	//ReportDead(cur_ctxt_hndl, OLD_CTXT, 1);
 
     }
     else{
-        dr_fprintf(gTraceFile, "else\n");
+        //dr_fprintf(gTraceFile, "else\n");
 	*(status +  PAGE_OFFSET((uint64_t)address)) = ONE_BYTE_WRITE_ACTION;
     }
     *lastIP = cur_ctxt_hndl;
+    //dr_fprintf(gTraceFile, "Hash Value: %d\n", myhash);
 }
 
 
 void
-Record2BytesMemRead(void *addr){
+Record2ByteMemRead(void *addr){
+    size_t address;
+    address = (size_t) addr;
+    uint8_t *status = shadow_mem.GetShadowBaseAddress(address);
+    //dr_fprintf(gTraceFile, "2Byte status: %p\n", status);
+    //dr_fprintf(gTraceFile, "address:%p, status+:%p\n", address, (status + PAGE_OFFSET((uint64_t)address)));
+
+    // status == 0 if not created.
+    if (PAGE_OFFSET((uint64_t)address) != PAGE_OFFSET_MASK) {
+        if (status) {
+	    *((uint16_t*)status + PAGE_OFFSET((uint64_t)address)) = TWO_BYTE_READ_ACTION;
+	}
+    }
+    else {
+        dr_fprintf(gTraceFile, "else\n");
+        if (status) {
+	    *(status + PAGE_OFFSET_MASK) = ONE_BYTE_READ_ACTION;
+	}
+	status = shadow_mem.GetShadowBaseAddress(address + 1);
+        //dr_fprintf(gTraceFile, "status: %p\n", status);
+	if (status) {
+	    *status = ONE_BYTE_READ_ACTION;
+	}
+    }
+    //dr_fprintf(gTraceFile, "status: %p\n", status);
 
 }
 
 
 void
-Record2BytesMemWrite(void *addr, context_handle_t cur_ctxt_hndl) {
+Record2ByteMemWrite(void *addr, context_handle_t cur_ctxt_hndl) {
+    size_t address;
+    address = (size_t) addr;
+    uint8_t *status = shadow_mem.GetOrCreateShadowBaseAddress(address);
+    //dr_fprintf(gTraceFile, "status %p\n", status);
+    
+    // status == 0 if not created
+    if (PAGE_OFFSET((uint64_t)address) != PAGE_OFFSET_MASK) {
+        uint32_t *lastIP = (uint32_t*)(status + SHADOW_PAGE_SIZE + PAGE_OFFSET((uint64_t)address * sizeof(uint32_t)));
+	uint16_t state = *((uint16_t*)(status + PAGE_OFFSET((uint64_t)address)));
 
+	if (state != TWO_BYTE_READ_ACTION) {
+	    DECLARE_HASHVAR(myhash);
+	
+	    // fast path where all bytes are dead by same context
+	    if (state == TWO_BYTE_WRITE_ACTION && lastIP[0] == lastIP[1]) {
+	        REPORT_DEAD(cur_ctxt_hndl, *(lastIP), myhash, 2);
+	        // State is already written, so no need to dead write in a tool that detects dead writes
+	    }
+	    else {
+	        // slow path
+		// byte 1 dead ?
+		REPORT_IF_DEAD(0x00ff, cur_ctxt_hndl, lastIP[0], myhash);
+		// byte 2 dead ?
+		REPORT_IF_DEAD(0xff00, cur_ctxt_hndl, lastIP[1], myhash);
+		// update state for all
+		*((uint16_t*)(status +  PAGE_OFFSET((uint64_t)address))) = TWO_BYTE_WRITE_ACTION;
+	    }
+	    
+	}
+	else {
+	    // record as written
+	    *((uint16_t*)(status +  PAGE_OFFSET((uint64_t)address))) = TWO_BYTE_WRITE_ACTION;
+	}
+
+	lastIP[0] = cur_ctxt_hndl;
+	lastIP[1] = cur_ctxt_hndl;
+    }
+    else {
+        Record1ByteMemWrite(addr, cur_ctxt_hndl);
+        Record1ByteMemWrite(((char*)addr) + 1, cur_ctxt_hndl);
+    }
 }
+
+
+void
+Record4ByteMemRead(void *addr) {
+    size_t address;
+    address = (size_t) addr;
+    uint8_t *status = shadow_mem.GetShadowBaseAddress(address);
+    // status == 0 if not created
+    int overflow = PAGE_OFFSET((uint64_t)address) - (PAGE_OFFSET_MASK - 3);
+
+    if (overflow <= 0) {
+        if (status) {
+	    *((uint32_t*)(status + PAGE_OFFSET((uint64_t)address)))  = FOUR_BYTE_READ_ACTION;
+	}
+    } else {
+        if (status) {
+	    status += PAGE_OFFSET((uint64_t)address);
+
+	    for (int nonOverflowBytes = 0; nonOverflowBytes < 4 - overflow; nonOverflowBytes++){
+	        *(status++) = ONE_BYTE_READ_ACTION;
+	    }
+	}
+
+	status = shadow_mem.GetShadowBaseAddress(address + 4); // +4 so that we get next page
+
+	if (status) {
+	    for (; overflow; overflow--) {
+	        *(status++) = ONE_BYTE_READ_ACTION;
+	    }
+	}
+    }
+}
+
+
+void
+Record4ByteMemWrite(void *addr, context_handle_t cur_ctxt_hndl) {
+    size_t address;
+    address = (size_t) addr;
+    uint8_t *status = shadow_mem.GetOrCreateShadowBaseAddress(address);
+
+    // status == 0 if not created
+    if (PAGE_OFFSET((uint64_t)address) < (PAGE_OFFSET_MASK - 2)) {
+        uint32_t* lastIP = (uint32_t*)(status + SHADOW_PAGE_SIZE +  PAGE_OFFSET((uint64_t)address) * sizeof(uint32_t));
+	uint32_t state = *((uint32_t*)(status +  PAGE_OFFSET((uint64_t)address)));
+
+	if (state != FOUR_BYTE_READ_ACTION) {
+	    DECLARE_HASHVAR(myhash);
+	    uint32_t ipZero = lastIP[0];
+
+	    // fast path where all bytes are dead by same context
+	    if (state == FOUR_BYTE_WRITE_ACTION && ipZero == lastIP[0] &&
+	                    ipZero == lastIP[1] && ipZero == lastIP[2] && ipZero == lastIP[3]) {
+                REPORT_DEAD(cur_ctxt_hndl, ipZero, myhash, 4);
+		// State is already written, so no need to dead write in a tool that detects dead writes
+	    } else {
+	        // slow path
+		// byte 1 dead ?
+		REPORT_IF_DEAD(0x000000ff, cur_ctxt_hndl, ipZero, myhash);
+		// byte 2 dead ?
+		REPORT_IF_DEAD(0x0000ff00, cur_ctxt_hndl, lastIP[1], myhash);
+		// byte 3 dead ?
+		REPORT_IF_DEAD(0x00ff0000, cur_ctxt_hndl, lastIP[2], myhash);
+		// byte 4 dead ?
+		REPORT_IF_DEAD(0xff000000, cur_ctxt_hndl, lastIP[3], myhash);
+		// update state for all 
+		*((uint32_t*)(status +  PAGE_OFFSET((uint64_t)address))) = FOUR_BYTE_WRITE_ACTION;
+	    }
+	} else {
+	    // record as written
+	    *((uint32_t*)(status +  PAGE_OFFSET((uint64_t)address))) = FOUR_BYTE_WRITE_ACTION;
+	}
+
+	lastIP[0] = cur_ctxt_hndl;
+	lastIP[1] = cur_ctxt_hndl;
+	lastIP[2] = cur_ctxt_hndl;
+	lastIP[3] = cur_ctxt_hndl;
+    } else {
+        Record1ByteMemWrite(addr, cur_ctxt_hndl);
+        Record1ByteMemWrite(((char*)addr) + 1, cur_ctxt_hndl);
+        Record1ByteMemWrite(((char*)addr) + 2, cur_ctxt_hndl);
+        Record1ByteMemWrite(((char*)addr) + 3, cur_ctxt_hndl);
+    }
+}
+
+void
+Record8ByteMemRead(void *addr) {
+    size_t address;
+    address = (size_t) addr;
+    uint8_t* status = shadow_mem.GetShadowBaseAddress(address);
+    dr_fprintf(gTraceFile, "status %p\n", status);
+    // status == 0 if not created
+    int overflow = PAGE_OFFSET((uint64_t)address) - (PAGE_OFFSET_MASK - 7);
+
+    if (overflow <= 0) {
+        if (status) {
+	    *((uint64_t*)(status + PAGE_OFFSET((uint64_t)address)))  = EIGHT_BYTE_READ_ACTION;
+	}
+    } else {
+        if (status) {
+	    status += PAGE_OFFSET((uint64_t)address);
+
+	    for (int nonOverflowBytes = 0; nonOverflowBytes < 8 - overflow; nonOverflowBytes++) {
+	        *(status++) = ONE_BYTE_READ_ACTION;
+	    }
+	}
+
+	status = shadow_mem.GetShadowBaseAddress(address + 8);  // +8 so that we get next page
+
+	if (status) {
+	   for (; overflow; overflow--) {
+	       *(status++) = ONE_BYTE_READ_ACTION;
+	   }
+	}
+    }
+}
+
+
+void
+Record8ByteMemWrite(void *addr, context_handle_t cur_ctxt_hndl) {
+    size_t address;
+    address = (size_t) addr;
+    //uint8_t *status = shadow_mem.GetOrCreateShadowBaseAddress(address);
+    // status == 0 if not created
+/*
+    if (PAGE_OFFSET((uint64_t)address) < (PAGE_OFFSET_MASK - 6)) {
+        uint32_t *lastIP = (uint32_t*)(status + SHADOW_PAGE_SIZE + PAGE_OFFSET((uint64_t)address) * sizeof(uint32_t));
+	uint64_t state = *((uint64_t*)(status + PAGE_OFFSET((uint64_t)address)));
+
+    }
+*/
+}
+
+
 
 // client want to do
 void
@@ -285,19 +486,29 @@ DoWhatClientWantTodo(void *drcontext, context_handle_t cur_ctxt_hndl, mem_ref_t 
 	}
     }
     case 2:{
-        //dr_fprintf(gTraceFile, "case 2\n");
         if (op == 0){
-	    Record2BytesMemRead(addr);
+	    Record2ByteMemRead(addr);
 	}
 	if (op == 1) {
-	    Record2BytesMemWrite(addr, cur_ctxt_hndl);
+	    Record2ByteMemWrite(addr, cur_ctxt_hndl);
 	}
     }
-    case 4:
-        //dr_fprintf(gTraceFile, "case 4\n");
-    case 8:
-        //dr_fprintf(gTraceFile, "case 8\n");
-    
+    case 4:{
+        if (op == 0) {
+	    //Record4ByteMemRead(addr);
+	}
+	if (op == 1) {
+	    //Record4ByteMemWrite(addr, cur_ctxt_hndl);
+	}
+    }
+    case 8: {
+        if (op == 0) {
+	    //Record8ByteMemRead(addr);
+	}
+	if (op == 1) {
+	    //Record8ByteMemWrite(addr, cur_ctxt_hndl);
+	}
+    }
     case 10:
         //dr_fprintf(gTraceFile, "case 10\n");
 	//if (op == 0){
