@@ -231,28 +231,45 @@ void
 Record1ByteMemWrite(void *addr, context_handle_t cur_ctxt_hndl){
     size_t address;
     address = (size_t) addr;
-    uint8_t *status = shadow_mem.GetOrCreateShadowBaseAddress(address);
+    //context_handle_t: int32_t
+    uint8_t *status = shadow_mem.GetOrCreateShadowAddress(address);
     uint32_t *lastIP = (uint32_t *)(status + SHADOW_PAGE_SIZE + PAGE_OFFSET((uint64_t)address) * sizeof(uint32_t));
+    
+    
+    //int32_t *lastIP = (int32_t *)(status + SHADOW_PAGE_SIZE + PAGE_OFFSET((uint64_t)address) * sizeof(int32_t));
+    //dr_fprintf(gTraceFile, "status: %p\n", status);
+    //dr_fprintf(gTraceFile, "lastIP: %p\n", lastIP);
+    //*lastIP = 16;
+    //dr_fprintf(gTraceFile, "after 16\n");
+
     //dr_fprintf(gTraceFile, "address:%p, status+:%p\n", address, (status + PAGE_OFFSET((uint64_t)address)));
+
 
     if (*(status + PAGE_OFFSET((uint64_t)address)) == ONE_BYTE_WRITE_ACTION){
         //dr_fprintf(gTraceFile, "if\n");
 	DECLARE_HASHVAR(myhash);
-	//uint64_t myhash;
 	REPORT_DEAD(cur_ctxt_hndl, OLD_CTXT, myhash, 1);
-        //dr_fprintf(gTraceFile, "Hash Value: %d\n", myhash);
-	
-	//uint64_t myhash;
-	//DECLARE_HASHVAR(myhash);
-	//ReportDead(cur_ctxt_hndl, OLD_CTXT, 1);
 
     }
     else{
         //dr_fprintf(gTraceFile, "else\n");
 	*(status +  PAGE_OFFSET((uint64_t)address)) = ONE_BYTE_WRITE_ACTION;
     }
+    //dr_fprintf(gTraceFile, "lastIP: %p\n", lastIP);
+    //dr_fprintf(gTraceFile, "cur: %d\n", cur_ctxt_hndl);
+    
+    // jtan: sometimes crash following line:
     *lastIP = cur_ctxt_hndl;
-    //dr_fprintf(gTraceFile, "Hash Value: %d\n", myhash);
+    
+    /*
+    uint32_t tmp = cur_ctxt_hndl;
+    dr_fprintf(gTraceFile, "line 1 %p\n", lastIP);
+    *lastIP = 16;
+    dr_fprintf(gTraceFile, "line 2\n");
+    *lastIP = tmp;
+    dr_fprintf(gTraceFile, "line 3\n");
+    //dr_fprintf(gTraceFile, "after lastIP: %d\n", *lastIP);
+    */
 }
 
 
@@ -290,7 +307,7 @@ void
 Record2ByteMemWrite(void *addr, context_handle_t cur_ctxt_hndl) {
     size_t address;
     address = (size_t) addr;
-    uint8_t *status = shadow_mem.GetOrCreateShadowBaseAddress(address);
+    uint8_t *status = shadow_mem.GetOrCreateShadowAddress(address);
     //dr_fprintf(gTraceFile, "status %p\n", status);
     
     // status == 0 if not created
@@ -368,7 +385,7 @@ void
 Record4ByteMemWrite(void *addr, context_handle_t cur_ctxt_hndl) {
     size_t address;
     address = (size_t) addr;
-    uint8_t *status = shadow_mem.GetOrCreateShadowBaseAddress(address);
+    uint8_t *status = shadow_mem.GetOrCreateShadowAddress(address);
 
     // status == 0 if not created
     if (PAGE_OFFSET((uint64_t)address) < (PAGE_OFFSET_MASK - 2)) {
@@ -419,7 +436,7 @@ Record8ByteMemRead(void *addr) {
     size_t address;
     address = (size_t) addr;
     uint8_t* status = shadow_mem.GetShadowBaseAddress(address);
-    dr_fprintf(gTraceFile, "status %p\n", status);
+    //dr_fprintf(gTraceFile, "status %p\n", status);
     // status == 0 if not created
     int overflow = PAGE_OFFSET((uint64_t)address) - (PAGE_OFFSET_MASK - 7);
 
@@ -451,8 +468,17 @@ void
 Record8ByteMemWrite(void *addr, context_handle_t cur_ctxt_hndl) {
     size_t address;
     address = (size_t) addr;
-    //uint8_t *status = shadow_mem.GetOrCreateShadowBaseAddress(address);
+    // jtan: crash following line:
+    uint8_t *status = shadow_mem.GetOrCreateShadowAddress(address);
+
+    //dr_fprintf(gTraceFile, "address %p\n", address);
+    uint8_t *tmp;
+    dr_fprintf(gTraceFile, "1\n");
+    shadow_mem.GetOrCreateShadowAddress(address);
+    dr_fprintf(gTraceFile, "2\n");
+    
     // status == 0 if not created
+
 /*
     if (PAGE_OFFSET((uint64_t)address) < (PAGE_OFFSET_MASK - 6)) {
         uint32_t *lastIP = (uint32_t*)(status + SHADOW_PAGE_SIZE + PAGE_OFFSET((uint64_t)address) * sizeof(uint32_t));
@@ -483,8 +509,10 @@ DoWhatClientWantTodo(void *drcontext, context_handle_t cur_ctxt_hndl, mem_ref_t 
 	}
         if (op == 1){
 	    Record1ByteMemWrite(addr, cur_ctxt_hndl);
+            //dr_fprintf(gTraceFile, "op == 1 Run\n");
 	}
     }
+    break;
     case 2:{
         if (op == 0){
 	    Record2ByteMemRead(addr);
@@ -496,18 +524,19 @@ DoWhatClientWantTodo(void *drcontext, context_handle_t cur_ctxt_hndl, mem_ref_t 
     case 4:{
         if (op == 0) {
 	    Record4ByteMemRead(addr);
-            dr_fprintf(gTraceFile, "Dump Here\n");
+            //dr_fprintf(gTraceFile, "Run\n");
+            //dr_fprintf(gTraceFile, "Dump Here\n");
 	}
 	if (op == 1) {
-	    //Record4ByteMemWrite(addr, cur_ctxt_hndl);
+	    Record4ByteMemWrite(addr, cur_ctxt_hndl);
 	}
     }
     case 8: {
         if (op == 0) {
-	    //Record8ByteMemRead(addr);
+	    Record8ByteMemRead(addr);
 	}
 	if (op == 1) {
-	    //Record8ByteMemWrite(addr, cur_ctxt_hndl);
+	    Record8ByteMemWrite(addr, cur_ctxt_hndl);
 	}
     }
     case 10:
@@ -680,7 +709,7 @@ ClientInit(int argc, const char *argv[])
     gTraceFile = dr_open_file(name, DR_FILE_WRITE_OVERWRITE | DR_FILE_ALLOW_LARGE);
     DR_ASSERT(gTraceFile != INVALID_FILE);
     
-    dr_fprintf(gTraceFile, "jtan: addr and refsize\n");   
+    dr_fprintf(gTraceFile, "client: addr and refsize\n");   
 }
 
 static void
