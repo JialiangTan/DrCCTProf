@@ -246,19 +246,17 @@ Record1ByteMemWrite(void *addr, context_handle_t cur_ctxt_hndl){
 
 
     if (*(status + PAGE_OFFSET((uint64_t)address)) == ONE_BYTE_WRITE_ACTION){
-        //dr_fprintf(gTraceFile, "if\n");
 	DECLARE_HASHVAR(myhash);
 	REPORT_DEAD(cur_ctxt_hndl, OLD_CTXT, myhash, 1);
 
     }
     else{
-        //dr_fprintf(gTraceFile, "else\n");
 	*(status +  PAGE_OFFSET((uint64_t)address)) = ONE_BYTE_WRITE_ACTION;
     }
     //dr_fprintf(gTraceFile, "lastIP: %p\n", lastIP);
     //dr_fprintf(gTraceFile, "cur: %d\n", cur_ctxt_hndl);
     
-    // jtan: sometimes crash following line:
+    // jtan: crash following line:
     *lastIP = cur_ctxt_hndl;
     
     /*
@@ -469,13 +467,11 @@ Record8ByteMemWrite(void *addr, context_handle_t cur_ctxt_hndl) {
     size_t address;
     address = (size_t) addr;
     // jtan: crash following line:
-    uint8_t *status = shadow_mem.GetOrCreateShadowAddress(address);
+    //uint8_t *status = shadow_mem.GetOrCreateShadowAddress(address);
 
     //dr_fprintf(gTraceFile, "address %p\n", address);
-    uint8_t *tmp;
-    dr_fprintf(gTraceFile, "1\n");
-    shadow_mem.GetOrCreateShadowAddress(address);
-    dr_fprintf(gTraceFile, "2\n");
+    uint8_t *status;
+    //shadow_mem.GetOrCreateShadowAddress(address);
     
     // status == 0 if not created
 
@@ -488,6 +484,10 @@ Record8ByteMemWrite(void *addr, context_handle_t cur_ctxt_hndl) {
 */
 }
 
+void
+Record10ByteMemRead() {
+
+}
 
 
 // client want to do
@@ -513,6 +513,7 @@ DoWhatClientWantTodo(void *drcontext, context_handle_t cur_ctxt_hndl, mem_ref_t 
 	}
     }
     break;
+
     case 2:{
         if (op == 0){
 	    Record2ByteMemRead(addr);
@@ -521,6 +522,8 @@ DoWhatClientWantTodo(void *drcontext, context_handle_t cur_ctxt_hndl, mem_ref_t 
 	    Record2ByteMemWrite(addr, cur_ctxt_hndl);
 	}
     }
+    break;
+
     case 4:{
         if (op == 0) {
 	    Record4ByteMemRead(addr);
@@ -531,6 +534,8 @@ DoWhatClientWantTodo(void *drcontext, context_handle_t cur_ctxt_hndl, mem_ref_t 
 	    Record4ByteMemWrite(addr, cur_ctxt_hndl);
 	}
     }
+    break;
+/*
     case 8: {
         if (op == 0) {
 	    Record8ByteMemRead(addr);
@@ -539,18 +544,39 @@ DoWhatClientWantTodo(void *drcontext, context_handle_t cur_ctxt_hndl, mem_ref_t 
 	    Record8ByteMemWrite(addr, cur_ctxt_hndl);
 	}
     }
-    case 10:
-        //dr_fprintf(gTraceFile, "case 10\n");
-	//if (op == 0){
-	    //Record1ByteMemRead(addr);
-        //}
+    break;
 
-    case 16:
-        //dr_fprintf(gTraceFile, "case 16\n");
-    default:
-        //dr_fprintf(gTraceFile, "default\n");
-        break;
-    
+    case 10: {
+	if (op == 0){
+	    Record10ByteMemRead(addr);
+        }
+	if (op == 1) {
+	    Record10ByteMemWrite(addr, cur_ctxt_hndl);
+	}
+    }
+    break;
+
+    case 16: {
+        if (op == 0) {
+	    Record16ByteMemRead(addr);
+	}
+	if (op == 1) {
+	    Record16ByteMemWrite(addr, cur_ctxt_hndl);
+	}
+    }
+    break;
+
+    default: {
+        if (op == 0) {
+	    RecordLargeMemRead(addr);
+	}
+	if (op == 1) {
+	    RecordLargeMemWrite(addr, cur_ctxt_hndl);
+	}
+
+    }
+    break;
+*/    
     }//switch
     
 }
@@ -715,6 +741,9 @@ ClientInit(int argc, const char *argv[])
 static void
 ClientExit(void)
 {
+    // Add a function to report entire stats at the termination
+
+
     // add output module here
     drcctlib_exit();
 
