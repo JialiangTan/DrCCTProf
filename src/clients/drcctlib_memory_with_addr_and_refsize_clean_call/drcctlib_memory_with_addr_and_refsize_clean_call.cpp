@@ -19,6 +19,7 @@
 #include "drcctlib.h"
 #include "shadow_memory.h"
 
+#define OUTPUT_SIZE 200
 #define DRCCTLIB_PRINTF(_FORMAT, _ARGS...) \
     DRCCTLIB_PRINTF_TEMPLATE("memory_with_addr_and_refsize_clean_call", _FORMAT, ##_ARGS)
 #define DRCCTLIB_EXIT_PROCESS(_FORMAT, _ARGS...)                                           \
@@ -27,6 +28,7 @@
 
 static int tls_idx;
 static file_t gTraceFile;
+volatile uint32_t NumThreads;
 
 enum {
     INSTRACE_TLS_OFFS_BUF_PTR,
@@ -58,6 +60,18 @@ typedef struct DeadInfo {
     void* secondIP;
     uint64_t count;
 } DeadInfo;
+
+
+typedef struct MergeDeadInfo {
+    uint32_t context1;
+    uint32_t context2;
+
+}
+
+type struct DeadInfoForPresentation {
+    const MergeDeadInfo *pMergeDeadInfo;
+    uint64_t count;
+}
 
 
 // ensures CONTINUOUS_DEADINFO
@@ -210,6 +224,11 @@ ReportDead(context_handle_t cur_ctxt_hndl, uint32_t lastCtxt, uint64_t hashVar, 
     } while(0);
 }
 # endif
+
+
+// GetOrCreateShadowBaseAddress
+
+
 
 
 void
@@ -486,8 +505,33 @@ Record8ByteMemWrite(void *addr, context_handle_t cur_ctxt_hndl) {
 
 void
 Record10ByteMemRead() {
-
 }
+
+
+void 
+Record10ByteMemWrite() {}
+
+
+void
+Record16ByteMemRead() {
+}
+
+
+void
+Record16ByteMemWrite() {}
+
+
+void
+RecordLargeMemRead() {}
+
+
+void
+RecordLargeMemWrite() {}
+
+// Returns the total N-byte size writes across all CCTs
+//uint64_t GetTotalNByteWrites(uint32_t size) {
+
+//}
 
 
 // client want to do
@@ -704,7 +748,9 @@ InstrumentInsCallback(void *drcontext, instr_instrument_msg_t *instrument_msg)
 
 static void
 ClientThreadStart(void *drcontext)
-{
+{   
+    // jtan
+    // get thread number
     per_thread_t *pt = (per_thread_t *)dr_thread_alloc(drcontext, sizeof(per_thread_t));
     if (pt == NULL) {
         DRCCTLIB_EXIT_PROCESS("pt == NULL");
@@ -721,6 +767,7 @@ static void
 ClientThreadEnd(void *drcontext)
 {
     per_thread_t *pt = (per_thread_t *)drmgr_get_tls_field(drcontext, tls_idx);
+    //PrintTopN(pt, OUTPUT_SIZE);
     dr_global_free(pt->cur_buf_list, TLS_MEM_REF_BUFF_SIZE * sizeof(mem_ref_t));
     dr_thread_free(drcontext, pt, sizeof(per_thread_t));
 }
@@ -735,15 +782,18 @@ ClientInit(int argc, const char *argv[])
     gTraceFile = dr_open_file(name, DR_FILE_WRITE_OVERWRITE | DR_FILE_ALLOW_LARGE);
     DR_ASSERT(gTraceFile != INVALID_FILE);
     
-    dr_fprintf(gTraceFile, "client: addr and refsize\n");   
+    dr_fprintf(gTraceFile, "ClientInit\n");   
 }
 
 static void
 ClientExit(void)
 {
     // Add a function to report entire stats at the termination
+    dr_fprintf(gTraceFile, "ClientExit\n");
+    uint64_t measurementBaseCount = 1.09;
 
-
+    dr_fprintf(gTraceFile, "#deads\n");
+    dr_fprintf(gTraceFile, "GrandTotalWrites = %\n" PRIu64, measurementBaseCount);
     // add output module here
     drcctlib_exit();
 
