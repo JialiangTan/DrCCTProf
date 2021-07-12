@@ -6,6 +6,7 @@
 
 #include <cstddef>
 #include <unordered_map>
+#include <map>
 // Need GOOGLE sparse hash tables
 //#include <google/sparse_hash_map>
 //#include <google/dense_hash_map>
@@ -25,6 +26,8 @@
 #define DRCCTLIB_EXIT_PROCESS(_FORMAT, _ARGS...)                                           \
     DRCCTLIB_CLIENT_EXIT_PROCESS_TEMPLATE("memory_with_addr_and_refsize_clean_call", _FORMAT, \
                                           ##_ARGS)
+
+#define MAX_CLIENT_CCT_PRINT_DEPTH 3
 
 static int tls_idx;
 static file_t gTraceFile;
@@ -61,18 +64,53 @@ typedef struct DeadInfo {
     uint64_t count;
 } DeadInfo;
 
-
-typedef struct MergeDeadInfo {
+typedef struct MergedDeadInfo {
     uint32_t context1;
     uint32_t context2;
 
-}
+    bool operator == (const MergedDeadInfo& x) const {
+        if (this->context1 == x.context1 && this->context2 == x.context2)
+	    return true;
+	return false;
+    }
 
-type struct DeadInfoForPresentation {
-    const MergeDeadInfo *pMergeDeadInfo;
+    bool operator < (const MergedDeadInfo& x) const {
+        if ((this->context1 < x.context1) || (this->context1 == x.context1 && this->context2 < x.context2))
+	    return true;
+	return false;
+    }
+} MergedDeadInfo;
+
+typedef struct DeadInfoForPresentation {
+    const MergedDeadInfo *pMergedDeadInfo;
     uint64_t count;
-}
+} DeadInfoForPresentation;
 
+ConcurrentShadowMemory<uint8_t> shadow_mem;
+
+/*
+// 64KB shadow pages
+#define PAGE_OFFSET_BITS (16LL)
+#define PAGE_OFFSET(addr) ( addr & 0xFFFF)
+#define PAGE_OFFSET_MASK ( 0xFFFF)
+
+#define PAGE_SIZE (1 << PAGE_OFFSET_BITS)
+
+uint8_t** gL1PageTable[LEVEL_1_PAGE_TABLE_SIZE];
+
+// 2 level page table
+#define PTR_SIZE (sizeof(struct Status *))
+#define LEVEL_1_PAGE_TABLE_BITS  (20)
+#define LEVEL_1_PAGE_TABLE_ENTRIES  (1 << LEVEL_1_PAGE_TABLE_BITS )
+#define LEVEL_1_PAGE_TABLE_SIZE  (LEVEL_1_PAGE_TABLE_ENTRIES * PTR_SIZE )
+
+#define LEVEL_2_PAGE_TABLE_BITS  (12)
+#define LEVEL_2_PAGE_TABLE_ENTRIES  (1 << LEVEL_2_PAGE_TABLE_BITS )
+#define LEVEL_2_PAGE_TABLE_SIZE  (LEVEL_2_PAGE_TABLE_ENTRIES * PTR_SIZE )
+
+#define LEVEL_1_PAGE_TABLE_SLOT(addr) ((((uint64_t)addr) >> (LEVEL_2_PAGE_TABLE_BITS + PAGE_OFFSET_BITS)) & 0xfffff)
+#define LEVEL_2_PAGE_TABLE_SLOT(addr) ((((uint64_t)addr) >> (PAGE_OFFSET_BITS)) & 0xFFF)
+*/
 
 // ensures CONTINUOUS_DEADINFO
 #define CONTINUOUS_DEADINFO
@@ -129,9 +167,7 @@ hashVar |= key;\
 #endif
 
 
-
 #define OLD_CTXT (*lastIP)
-
 
 
 #if defined(CONTINUOUS_DEADINFO)
@@ -166,8 +202,6 @@ DeadMap.insert(std::pair<uint64_t, DeadInfo>(hashVar, deadInfo)); \
 REPORT_DEAD(curCtxt, lastCtxt, hashVar, 1);\
 }}while(0)
 
-
-ConcurrentShadowMemory<uint8_t> shadow_mem;
 
 /*
 // make 64bit hash from 2 32bit deltas from
@@ -225,83 +259,65 @@ ReportDead(context_handle_t cur_ctxt_hndl, uint32_t lastCtxt, uint64_t hashVar, 
 }
 # endif
 
+/*
+uint8_t *GetOrCreateShadowBaseAddress(void *address) {
+    uint8_t *shadowpage;
+    uint8_t** *l1Ptr = &gL1PageTable[LEVEL_1_PAGE_TABLE_SLOT(address)];
 
-// GetOrCreateShadowBaseAddress
+    if(*l1Ptr == 0) {
+        *l1Ptr = (uint8_t**) calloc(1, LEVEL_2_PAGE_TABLE_SIZE);
+        shadowPage = (*l1Ptr)[LEVEL_2_PAGE_TABLE_SLOT(address)] = (uint8_t*) mmap(0, PAGE_SIZE * (1 + sizeof(uint32_t)), PROT_WRITE | PROT_READ, MAP_NORESERVE | MAP_PRIVATE | MAP_ANONYMOUS, 0, 0);
+    } else if((shadowPage = (*l1Ptr)[LEVEL_2_PAGE_TABLE_SLOT(address)]) == 0) {
+        shadowPage = (*l1Ptr)[LEVEL_2_PAGE_TABLE_SLOT(address)] = (uint8_t*) mmap(0, PAGE_SIZE * (1 + sizeof(uint32_t)), PROT_WRITE | PROT_READ, MAP_NORESERVE | MAP_PRIVATE | MAP_ANONYMOUS, 0, 0);
+    }
 
-
+    return shadowPage;
+}
+*/
 
 
 void
 Record1ByteMemRead(void *addr){
-    size_t address;
-    address = (size_t) addr;
-    uint8_t *status = shadow_mem.GetShadowBaseAddress(address);
-    //dr_fprintf(gTraceFile, "status %p\n", status);
-    //dr_fprintf(gTraceFile, "address:%p, status+:%p\n", address, (status + PAGE_OFFSET((uint64_t)address)));
+    uint8_t *status = shadow_mem.GetShadowBaseAddress((uint64_t)addr);
+    dr_fprintf(gTraceFile, "1Byte read status: %p\n", status);
      
     // status == 0 if not created
     if (status){
         // NOT NEEDED status->lastIP = ip;
-	*(status + PAGE_OFFSET((uint64_t)address))  = ONE_BYTE_READ_ACTION;
+	*(status + PAGE_OFFSET((uint64_t)addr))  = ONE_BYTE_READ_ACTION;
     }
 }
 
 void
 Record1ByteMemWrite(void *addr, context_handle_t cur_ctxt_hndl){
-    size_t address;
-    address = (size_t) addr;
     //context_handle_t: int32_t
-    uint8_t *status = shadow_mem.GetOrCreateShadowAddress(address);
-    uint32_t *lastIP = (uint32_t *)(status + SHADOW_PAGE_SIZE + PAGE_OFFSET((uint64_t)address) * sizeof(uint32_t));
-    
-    
-    //int32_t *lastIP = (int32_t *)(status + SHADOW_PAGE_SIZE + PAGE_OFFSET((uint64_t)address) * sizeof(int32_t));
-    //dr_fprintf(gTraceFile, "status: %p\n", status);
-    //dr_fprintf(gTraceFile, "lastIP: %p\n", lastIP);
-    //*lastIP = 16;
-    //dr_fprintf(gTraceFile, "after 16\n");
+    uint8_t *status = shadow_mem.GetOrCreateShadowBaseAddress((uint64_t)addr);
+    uint32_t *lastIP = (uint32_t *)(status + SHADOW_PAGE_SIZE + PAGE_OFFSET((uint64_t)addr) * sizeof(uint32_t));    
+    dr_fprintf(gTraceFile, "1Byte write status: %p\n", status);
 
-    //dr_fprintf(gTraceFile, "address:%p, status+:%p\n", address, (status + PAGE_OFFSET((uint64_t)address)));
-
-
-    if (*(status + PAGE_OFFSET((uint64_t)address)) == ONE_BYTE_WRITE_ACTION){
+    if (*(status + PAGE_OFFSET((uint64_t)addr)) == ONE_BYTE_WRITE_ACTION){
 	DECLARE_HASHVAR(myhash);
 	REPORT_DEAD(cur_ctxt_hndl, OLD_CTXT, myhash, 1);
 
     }
     else{
-	*(status +  PAGE_OFFSET((uint64_t)address)) = ONE_BYTE_WRITE_ACTION;
+	*(status +  PAGE_OFFSET((uint64_t)addr)) = ONE_BYTE_WRITE_ACTION;
     }
-    //dr_fprintf(gTraceFile, "lastIP: %p\n", lastIP);
-    //dr_fprintf(gTraceFile, "cur: %d\n", cur_ctxt_hndl);
     
     // jtan: crash following line:
     *lastIP = cur_ctxt_hndl;
-    
-    /*
-    uint32_t tmp = cur_ctxt_hndl;
-    dr_fprintf(gTraceFile, "line 1 %p\n", lastIP);
-    *lastIP = 16;
-    dr_fprintf(gTraceFile, "line 2\n");
-    *lastIP = tmp;
-    dr_fprintf(gTraceFile, "line 3\n");
-    //dr_fprintf(gTraceFile, "after lastIP: %d\n", *lastIP);
-    */
 }
 
 
 void
 Record2ByteMemRead(void *addr){
-    size_t address;
-    address = (size_t) addr;
-    uint8_t *status = shadow_mem.GetShadowBaseAddress(address);
-    //dr_fprintf(gTraceFile, "2Byte status: %p\n", status);
-    //dr_fprintf(gTraceFile, "address:%p, status+:%p\n", address, (status + PAGE_OFFSET((uint64_t)address)));
+    uint8_t *status = shadow_mem.GetShadowBaseAddress((uint64_t)addr);
+    dr_fprintf(gTraceFile, "2Byte read status: %p\n", status);
 
     // status == 0 if not created.
-    if (PAGE_OFFSET((uint64_t)address) != PAGE_OFFSET_MASK) {
+    if (PAGE_OFFSET((uint64_t)addr) != PAGE_OFFSET_MASK) {
         if (status) {
-	    *((uint16_t*)status + PAGE_OFFSET((uint64_t)address)) = TWO_BYTE_READ_ACTION;
+	    *((uint16_t*)status + PAGE_OFFSET((uint64_t)addr)) = TWO_BYTE_READ_ACTION;
 	}
     }
     else {
@@ -309,28 +325,25 @@ Record2ByteMemRead(void *addr){
         if (status) {
 	    *(status + PAGE_OFFSET_MASK) = ONE_BYTE_READ_ACTION;
 	}
-	status = shadow_mem.GetShadowBaseAddress(address + 1);
+	status = shadow_mem.GetShadowBaseAddress(((uint64_t)addr) + 1);
         //dr_fprintf(gTraceFile, "status: %p\n", status);
 	if (status) {
 	    *status = ONE_BYTE_READ_ACTION;
 	}
     }
     //dr_fprintf(gTraceFile, "status: %p\n", status);
-
 }
 
 
 void
 Record2ByteMemWrite(void *addr, context_handle_t cur_ctxt_hndl) {
-    size_t address;
-    address = (size_t) addr;
-    uint8_t *status = shadow_mem.GetOrCreateShadowAddress(address);
-    //dr_fprintf(gTraceFile, "status %p\n", status);
+    uint8_t *status = shadow_mem.GetOrCreateShadowBaseAddress((uint64_t)addr);
+    dr_fprintf(gTraceFile, "2Byte write status: %p\n", status);
     
     // status == 0 if not created
-    if (PAGE_OFFSET((uint64_t)address) != PAGE_OFFSET_MASK) {
-        uint32_t *lastIP = (uint32_t*)(status + SHADOW_PAGE_SIZE + PAGE_OFFSET((uint64_t)address * sizeof(uint32_t)));
-	uint16_t state = *((uint16_t*)(status + PAGE_OFFSET((uint64_t)address)));
+    if (PAGE_OFFSET((uint64_t)addr) != PAGE_OFFSET_MASK) {
+        uint32_t *lastIP = (uint32_t*)(status + SHADOW_PAGE_SIZE + PAGE_OFFSET((uint64_t)addr * sizeof(uint32_t)));
+	uint16_t state = *((uint16_t*)(status + PAGE_OFFSET((uint64_t)addr)));
 
 	if (state != TWO_BYTE_READ_ACTION) {
 	    DECLARE_HASHVAR(myhash);
@@ -347,13 +360,13 @@ Record2ByteMemWrite(void *addr, context_handle_t cur_ctxt_hndl) {
 		// byte 2 dead ?
 		REPORT_IF_DEAD(0xff00, cur_ctxt_hndl, lastIP[1], myhash);
 		// update state for all
-		*((uint16_t*)(status +  PAGE_OFFSET((uint64_t)address))) = TWO_BYTE_WRITE_ACTION;
+		*((uint16_t*)(status +  PAGE_OFFSET((uint64_t)addr))) = TWO_BYTE_WRITE_ACTION;
 	    }
 	    
 	}
 	else {
 	    // record as written
-	    *((uint16_t*)(status +  PAGE_OFFSET((uint64_t)address))) = TWO_BYTE_WRITE_ACTION;
+	    *((uint16_t*)(status +  PAGE_OFFSET((uint64_t)addr))) = TWO_BYTE_WRITE_ACTION;
 	}
 
 	lastIP[0] = cur_ctxt_hndl;
@@ -368,26 +381,26 @@ Record2ByteMemWrite(void *addr, context_handle_t cur_ctxt_hndl) {
 
 void
 Record4ByteMemRead(void *addr) {
-    size_t address;
-    address = (size_t) addr;
-    uint8_t *status = shadow_mem.GetShadowBaseAddress(address);
+    uint8_t *status = shadow_mem.GetShadowAddress((uint64_t)addr);
+    dr_fprintf(gTraceFile, "4Byte read status: %p\n", status);
+
     // status == 0 if not created
-    int overflow = PAGE_OFFSET((uint64_t)address) - (PAGE_OFFSET_MASK - 3);
+    int overflow = PAGE_OFFSET((uint64_t)addr) - (PAGE_OFFSET_MASK - 3);
 
     if (overflow <= 0) {
         if (status) {
-	    *((uint32_t*)(status + PAGE_OFFSET((uint64_t)address)))  = FOUR_BYTE_READ_ACTION;
+	    *((uint32_t*)(status + PAGE_OFFSET((uint64_t)addr)))  = FOUR_BYTE_READ_ACTION;
 	}
     } else {
         if (status) {
-	    status += PAGE_OFFSET((uint64_t)address);
+	    status += PAGE_OFFSET((uint64_t)addr);
 
 	    for (int nonOverflowBytes = 0; nonOverflowBytes < 4 - overflow; nonOverflowBytes++){
 	        *(status++) = ONE_BYTE_READ_ACTION;
 	    }
 	}
 
-	status = shadow_mem.GetShadowBaseAddress(address + 4); // +4 so that we get next page
+	status = shadow_mem.GetShadowBaseAddress(((uint64_t)addr) + 4); // +4 so that we get next page
 
 	if (status) {
 	    for (; overflow; overflow--) {
@@ -400,14 +413,13 @@ Record4ByteMemRead(void *addr) {
 
 void
 Record4ByteMemWrite(void *addr, context_handle_t cur_ctxt_hndl) {
-    size_t address;
-    address = (size_t) addr;
-    uint8_t *status = shadow_mem.GetOrCreateShadowAddress(address);
+    uint8_t *status = shadow_mem.GetOrCreateShadowAddress((uint64_t)addr);
+    dr_fprintf(gTraceFile, "4Byte write status: %p\n", status);
 
     // status == 0 if not created
-    if (PAGE_OFFSET((uint64_t)address) < (PAGE_OFFSET_MASK - 2)) {
-        uint32_t* lastIP = (uint32_t*)(status + SHADOW_PAGE_SIZE +  PAGE_OFFSET((uint64_t)address) * sizeof(uint32_t));
-	uint32_t state = *((uint32_t*)(status +  PAGE_OFFSET((uint64_t)address)));
+    if (PAGE_OFFSET((uint64_t)addr) < (PAGE_OFFSET_MASK - 2)) {
+        uint32_t* lastIP = (uint32_t*)(status + SHADOW_PAGE_SIZE +  PAGE_OFFSET((uint64_t)addr) * sizeof(uint32_t));
+	uint32_t state = *((uint32_t*)(status +  PAGE_OFFSET((uint64_t)addr)));
 
 	if (state != FOUR_BYTE_READ_ACTION) {
 	    DECLARE_HASHVAR(myhash);
@@ -429,11 +441,11 @@ Record4ByteMemWrite(void *addr, context_handle_t cur_ctxt_hndl) {
 		// byte 4 dead ?
 		REPORT_IF_DEAD(0xff000000, cur_ctxt_hndl, lastIP[3], myhash);
 		// update state for all 
-		*((uint32_t*)(status +  PAGE_OFFSET((uint64_t)address))) = FOUR_BYTE_WRITE_ACTION;
+		*((uint32_t*)(status +  PAGE_OFFSET((uint64_t)addr))) = FOUR_BYTE_WRITE_ACTION;
 	    }
 	} else {
 	    // record as written
-	    *((uint32_t*)(status +  PAGE_OFFSET((uint64_t)address))) = FOUR_BYTE_WRITE_ACTION;
+	    *((uint32_t*)(status +  PAGE_OFFSET((uint64_t)addr))) = FOUR_BYTE_WRITE_ACTION;
 	}
 
 	lastIP[0] = cur_ctxt_hndl;
@@ -450,27 +462,26 @@ Record4ByteMemWrite(void *addr, context_handle_t cur_ctxt_hndl) {
 
 void
 Record8ByteMemRead(void *addr) {
-    size_t address;
-    address = (size_t) addr;
-    uint8_t* status = shadow_mem.GetShadowBaseAddress(address);
-    //dr_fprintf(gTraceFile, "status %p\n", status);
+    uint8_t *status = shadow_mem.GetShadowBaseAddress((uint64_t)addr);
+    dr_fprintf(gTraceFile, "8Byte read status %p\n", status);
+    
     // status == 0 if not created
-    int overflow = PAGE_OFFSET((uint64_t)address) - (PAGE_OFFSET_MASK - 7);
+    int overflow = PAGE_OFFSET((uint64_t)addr) - (PAGE_OFFSET_MASK - 7);
 
     if (overflow <= 0) {
         if (status) {
-	    *((uint64_t*)(status + PAGE_OFFSET((uint64_t)address)))  = EIGHT_BYTE_READ_ACTION;
+	    *((uint64_t*)(status + PAGE_OFFSET((uint64_t)addr)))  = EIGHT_BYTE_READ_ACTION;
 	}
     } else {
         if (status) {
-	    status += PAGE_OFFSET((uint64_t)address);
+	    status += PAGE_OFFSET((uint64_t)addr);
 
 	    for (int nonOverflowBytes = 0; nonOverflowBytes < 8 - overflow; nonOverflowBytes++) {
 	        *(status++) = ONE_BYTE_READ_ACTION;
 	    }
 	}
 
-	status = shadow_mem.GetShadowBaseAddress(address + 8);  // +8 so that we get next page
+	status = shadow_mem.GetShadowBaseAddress(((uint64_t)addr) + 8);  // +8 so that we get next page
 
 	if (status) {
 	   for (; overflow; overflow--) {
@@ -483,24 +494,21 @@ Record8ByteMemRead(void *addr) {
 
 void
 Record8ByteMemWrite(void *addr, context_handle_t cur_ctxt_hndl) {
-    size_t address;
-    address = (size_t) addr;
     // jtan: crash following line:
-    //uint8_t *status = shadow_mem.GetOrCreateShadowAddress(address);
-
-    //dr_fprintf(gTraceFile, "address %p\n", address);
-    uint8_t *status;
-    //shadow_mem.GetOrCreateShadowAddress(address);
-    
+    uint8_t *status = shadow_mem.GetOrCreateShadowBaseAddress((uint64_t)addr);
+    dr_fprintf(gTraceFile, "8Byte write status %p\n", status);
     // status == 0 if not created
 
-/*
-    if (PAGE_OFFSET((uint64_t)address) < (PAGE_OFFSET_MASK - 6)) {
-        uint32_t *lastIP = (uint32_t*)(status + SHADOW_PAGE_SIZE + PAGE_OFFSET((uint64_t)address) * sizeof(uint32_t));
-	uint64_t state = *((uint64_t*)(status + PAGE_OFFSET((uint64_t)address)));
-
+    //uint8_t *status;
+    //shadow_mem.GetOrCreateShadowBaseAddress(addr);
+    
+    // TODO
+    if (PAGE_OFFSET((uint64_t)addr) < (PAGE_OFFSET_MASK - 6)) {
+        uint32_t *lastIP = (uint32_t*)(status + SHADOW_PAGE_SIZE + PAGE_OFFSET((uint64_t)addr) * sizeof(uint32_t));
+	uint64_t state = *((uint64_t*)(status + PAGE_OFFSET((uint64_t)addr)));
+        // TODO
     }
-*/
+
 }
 
 void
@@ -528,9 +536,9 @@ RecordLargeMemRead() {}
 void
 RecordLargeMemWrite() {}
 
+
 // Returns the total N-byte size writes across all CCTs
 //uint64_t GetTotalNByteWrites(uint32_t size) {
-
 //}
 
 
@@ -542,12 +550,12 @@ DoWhatClientWantTodo(void *drcontext, context_handle_t cur_ctxt_hndl, mem_ref_t 
     void *addr = ref->addr;
     int size = ref->size;
     //dr_fprintf(gTraceFile, "size is %d\n", size);
-    //if (op == 1){
-        //dr_fprintf(gTraceFile, "addr is %p\n", addr);
-        //dr_fprintf(gTraceFile, "op is %d\n", op);}
+    
+    //dr_fprintf(gTraceFile, "switch starts\n");
 
     switch (size){
     case 1:{
+        dr_fprintf(gTraceFile, "case1 starts\n");
 	if (op == 0){
 	    Record1ByteMemRead(addr);
 	}
@@ -768,6 +776,7 @@ ClientThreadEnd(void *drcontext)
 {
     per_thread_t *pt = (per_thread_t *)drmgr_get_tls_field(drcontext, tls_idx);
     //PrintTopN(pt, OUTPUT_SIZE);
+    dr_fprintf(gTraceFile, "ThreadEnd\n");
     dr_global_free(pt->cur_buf_list, TLS_MEM_REF_BUFF_SIZE * sizeof(mem_ref_t));
     dr_thread_free(drcontext, pt, sizeof(per_thread_t));
 }
@@ -778,10 +787,8 @@ ClientInit(int argc, const char *argv[])
     char name[MAXIMUM_PATH] = "";
     DRCCTLIB_INIT_LOG_FILE_NAME(name, "test", "out");
     DRCCTLIB_PRINTF("Creating log file at:%s", name);
-    
     gTraceFile = dr_open_file(name, DR_FILE_WRITE_OVERWRITE | DR_FILE_ALLOW_LARGE);
     DR_ASSERT(gTraceFile != INVALID_FILE);
-    
     dr_fprintf(gTraceFile, "ClientInit\n");   
 }
 
@@ -789,11 +796,34 @@ static void
 ClientExit(void)
 {
     // Add a function to report entire stats at the termination
+    auto mapIt = DeadMap.begin();
+    map<MergedDeadInfo, uint64_t> mergedDeadInfoMap;
+
+    for (; mapIt != DeadMap.end(); mapIt++) {
+        MergedDeadInfo tmpMergedDeadInfo;
+	uint64_t hash = mapIt->first;
+	uint32_t ctxt1 = (hash >> 32);
+	uint32_t ctxt2 = (hash & 0xffffffff);
+	tmpMergedDeadInfo.context1 = ctxt1;
+	tmpMergedDeadInfo.context2 = ctxt2;
+        dr_fprintf(gTraceFile, "hashVar: %lu\n", mapIt->first);
+        dr_fprintf(gTraceFile, "context1: %u\n", ctxt1);
+        dr_fprintf(gTraceFile, "context2: %u\n", ctxt2);
+        dr_fprintf(gTraceFile, "size: %lu\n", mapIt->second);
+        
+	//map<MergedDeadInfo, uint64_t>::iterator tmpIt;
+	//auto tmpIt;
+	//if (tmpIt = mergedDeadInfoMap)
+
+	//drcctlib_print_full_cct(gTraceFile, MAX_CLIENT_CCT_PRINT_DEPTH);
+    
+    }
+    
     dr_fprintf(gTraceFile, "ClientExit\n");
     uint64_t measurementBaseCount = 1.09;
 
     dr_fprintf(gTraceFile, "#deads\n");
-    dr_fprintf(gTraceFile, "GrandTotalWrites = %\n" PRIu64, measurementBaseCount);
+    dr_fprintf(gTraceFile, "GrandTotalWrites = %d\n", measurementBaseCount);
     // add output module here
     drcctlib_exit();
 
