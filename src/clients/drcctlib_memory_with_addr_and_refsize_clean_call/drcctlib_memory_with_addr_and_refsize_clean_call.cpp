@@ -19,6 +19,7 @@
 #include "drutil.h"
 #include "drcctlib.h"
 #include "shadow_memory.h"
+#include "shadow_memory_ml.h"
 
 #define OUTPUT_SIZE 200
 #define DRCCTLIB_PRINTF(_FORMAT, _ARGS...) \
@@ -642,6 +643,8 @@ InsertCleancall(int32_t slot, int32_t num, int32_t op)
     context_handle_t cur_ctxt_hndl = drcctlib_get_context_handle(drcontext, slot);
     for (int i = 0; i < num; i++) {
         if (pt->cur_buf_list[i].addr != 0) {
+	    //if (cur_ctxt_hndl == 0) {
+	        //DRCCTLIB_PRINTF("========");}
             DoWhatClientWantTodo(drcontext, cur_ctxt_hndl, &pt->cur_buf_list[i], op);
         }
     }
@@ -786,7 +789,7 @@ ClientInit(int argc, const char *argv[])
 {
     char name[MAXIMUM_PATH] = "";
     DRCCTLIB_INIT_LOG_FILE_NAME(name, "test", "out");
-    DRCCTLIB_PRINTF("Creating log file at:%s", name);
+    
     gTraceFile = dr_open_file(name, DR_FILE_WRITE_OVERWRITE | DR_FILE_ALLOW_LARGE);
     DR_ASSERT(gTraceFile != INVALID_FILE);
     dr_fprintf(gTraceFile, "ClientInit\n");   
@@ -811,6 +814,12 @@ ClientExit(void)
         dr_fprintf(gTraceFile, "context2: %u\n", ctxt2);
         dr_fprintf(gTraceFile, "size: %lu\n", mapIt->second);
         
+	//drcctlib_get_full_cct(context_handle_t ctxt_hndl, int max_depth);
+	if (ctxt1 == 0) {
+	    dr_fprintf(gTraceFile, "context 1 is 0");
+	} else {
+	    drcctlib_print_full_cct(gTraceFile, ctxt1, true, false, -1);
+	}
 	//map<MergedDeadInfo, uint64_t>::iterator tmpIt;
 	//auto tmpIt;
 	//if (tmpIt = mergedDeadInfoMap)
