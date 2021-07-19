@@ -1078,37 +1078,36 @@ ClientInit(int argc, const char *argv[])
 static void
 ClientExit(void)
 {
-    /*
-    // Add a function to report entire stats at the termination
+    // On program termination output all data and statistics
     auto mapIt = DeadMap.begin();
     map<MergedDeadInfo, uint64_t> mergedDeadInfoMap;
 
     for (; mapIt != DeadMap.end(); mapIt++) {
         MergedDeadInfo tmpMergedDeadInfo;
-	uint64_t hash = mapIt->first;
-	uint32_t ctxt1 = (hash >> 32);
-	uint32_t ctxt2 = (hash & 0xffffffff);
-	tmpMergedDeadInfo.context1 = ctxt1;
-	tmpMergedDeadInfo.context2 = ctxt2;
-        dr_fprintf(gTraceFile, "hashVar: %lu\n", mapIt->first);
-        dr_fprintf(gTraceFile, "context1: %u\n", ctxt1);
-        dr_fprintf(gTraceFile, "context2: %u\n", ctxt2);
-        dr_fprintf(gTraceFile, "size: %lu\n", mapIt->second);
+	    uint64_t hash = mapIt->first;
+	    uint32_t ctxt1 = (hash >> 32);
+	    uint32_t ctxt2 = (hash & 0xffffffff);
+	    tmpMergedDeadInfo.context1 = ctxt1;
+	    tmpMergedDeadInfo.context2 = ctxt2;
+        //dr_fprintf(gTraceFile, "hashVar: %lu\n", mapIt->first);
+        //dr_fprintf(gTraceFile, "context1: %u\n", ctxt1);
+        //dr_fprintf(gTraceFile, "context2: %u\n", ctxt2);
+        //dr_fprintf(gTraceFile, "size: %lu\n", mapIt->second);
         
-	//drcctlib_get_full_cct(context_handle_t ctxt_hndl, int max_depth);
-	if (ctxt1 == 0) {
-	    dr_fprintf(gTraceFile, "context 1 is 0");
-	} else {
-	    drcctlib_print_full_cct(gTraceFile, ctxt1, true, false, -1);
-	}
-	//map<MergedDeadInfo, uint64_t>::iterator tmpIt;
-	//auto tmpIt;
-	//if (tmpIt = mergedDeadInfoMap)
+	    //drcctlib_get_full_cct(context_handle_t ctxt_hndl, int max_depth);
+	    if (ctxt1 == 0) {
+	        dr_fprintf(gTraceFile, "context 1 is 0\n");
+	    } else {
+	        drcctlib_print_full_cct(gTraceFile, ctxt1, true, false, -1);
+            dr_fprintf(gTraceFile, "=====================================\n")
+	    }
+	    //map<MergedDeadInfo, uint64_t>::iterator tmpIt;
+	    //auto tmpIt;
+	    //if (tmpIt = mergedDeadInfoMap)
 
-	//drcctlib_print_full_cct(gTraceFile, MAX_CLIENT_CCT_PRINT_DEPTH);
-    
+	    //drcctlib_print_full_cct(gTraceFile, MAX_CLIENT_CCT_PRINT_DEPTH);
     }
-    */
+    
     
     dr_fprintf(gTraceFile, "ClientExit\n");
     uint64_t measurementBaseCount = 1.09;
