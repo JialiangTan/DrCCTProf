@@ -8,6 +8,10 @@
 #include <unordered_map>
 #include <map>
 #include<sys/mman.h>
+#include <list>
+#include <stdint.h>
+#include <unistd.h>
+#include <iostream>
 
 #include "dr_api.h"
 #include "drmgr.h"
@@ -19,7 +23,7 @@
 
 using namespace std;
 
-#define OUTPUT_SIZE 200
+#define OUTPUT_SIZE 20
 #define DRCCTLIB_PRINTF(_FORMAT, _ARGS...) \
     DRCCTLIB_PRINTF_TEMPLATE("memory_with_addr_and_refsize_clean_call", _FORMAT, ##_ARGS)
 #define DRCCTLIB_EXIT_PROCESS(_FORMAT, _ARGS...)                                           \
@@ -27,6 +31,7 @@ using namespace std;
                                           ##_ARGS)
 
 #define MAX_CLIENT_CCT_PRINT_DEPTH 3
+#define MAX_DEAD_CONTEXTS_TO_LOG 10
 
 static int tls_idx;
 static file_t gTraceFile;
@@ -161,8 +166,6 @@ hashVar |= key;\
 #endif
 
 
-//#define OLD_CTXT (*lastIP)
-
 
 #if defined(CONTINUOUS_DEADINFO)
 #define DECLARE_HASHVAR(name) uint64_t name
@@ -253,6 +256,9 @@ ReportDead(context_handle_t cur_ctxt_hndl, uint32_t lastCtxt, uint64_t hashVar, 
 */
 
 uint8_t** gL1PageTable[LEVEL_1_PAGE_TABLE_SIZE];
+uint64_t gTotalDead = 0;
+uint32_t gClientNumThreads = 1;
+
 
 uint8_t *GetOrCreateShadowBaseAddress(void *addr) {
     uint8_t *shadowPage;
@@ -819,10 +825,6 @@ RecordLargeMemWrite(void *addr, context_handle_t cur_ctxt_hndl, int size) {
     }
 }
 
-// Returns the total N-byte size writes across all CCTs
-//uint64_t GetTotalNByteWrites(uint32_t size) {
-//}
-
 
 // client want to do
 void
@@ -1075,10 +1077,50 @@ ClientInit(int argc, const char *argv[])
     dr_fprintf(gTraceFile, "ClientInit\n");   
 }
 
+
+// return the total N-byte size writes across all CCTs
+uint64_t GetTotalNByteWrites() {
+    uint64_t total = 0;
+    // TODO
+    return total;
+}
+
+
+uint64_t GetMeasurementBaseCount() {
+    // byte count
+    // uint64_t measurementBaseCount; 
+    return 0;
+}
+
+// Print calling context of a given DeadInfo
+void
+PrintIPAndCallingContexts(const DeadInfoForPresentation &di) {
+    dr_fprintf(gTraceFile, "di.count is: %lu\n", di.count);
+    dr_fprintf(gTraceFile, "--------------------------------\n");
+    drcctlib_print_full_cct(gTraceFile, di.pMergedDeadInfo->context1, true, false, -1);
+    dr_fprintf(gTraceFile, "***************\n");
+    drcctlib_print_full_cct(gTraceFile, di.pMergedDeadInfo->context2, true, false, -1);
+    dr_fprintf(gTraceFile, "--------------------------------\n");
+}
+
+bool
+MergedDeadInfoComparer(const DeadInfoForPresentation &first, const DeadInfoForPresentation &second) {
+    // return true if the given deadinfo belongs to one of the loaded binaries
+    /*
+    bool tmp = first.count > second.count ? true : false;
+    dr_fprintf(gTraceFile, "bool: %d\n", tmp);
+    return tmp;
+    */
+    return first.count > second.count ? true : false;
+}
+
+
 static void
 ClientExit(void)
 {
     // On program termination output all data and statistics
+
+    //unordered_map<uint64_t, uint64_t>::iterator mapIt = DeadMap.begin();
     auto mapIt = DeadMap.begin();
     map<MergedDeadInfo, uint64_t> mergedDeadInfoMap;
 
@@ -1087,26 +1129,70 @@ ClientExit(void)
 	    uint64_t hash = mapIt->first;
 	    uint32_t ctxt1 = (hash >> 32);
 	    uint32_t ctxt2 = (hash & 0xffffffff);
-	    tmpMergedDeadInfo.context1 = ctxt1;
-	    tmpMergedDeadInfo.context2 = ctxt2;
+	    tmpMergedDeadInfo.context1 = ctxt1; // old
+	    tmpMergedDeadInfo.context2 = ctxt2; // cur
+
         //dr_fprintf(gTraceFile, "hashVar: %lu\n", mapIt->first);
-        //dr_fprintf(gTraceFile, "context1: %u\n", ctxt1);
-        //dr_fprintf(gTraceFile, "context2: %u\n", ctxt2);
-        //dr_fprintf(gTraceFile, "size: %lu\n", mapIt->second);
-        
+        /*
+        dr_fprintf(gTraceFile, "context1: %u\n", ctxt1);
+        dr_fprintf(gTraceFile, "context2: %u\n", ctxt2);
+        dr_fprintf(gTraceFile, "size: %lu\n", mapIt->second);
+        dr_fprintf(gTraceFile, "====================\n");
+        */
+
+        map<MergedDeadInfo, uint64_t>::iterator tmpIt;
+
+        if ((tmpIt = mergedDeadInfoMap.find(tmpMergedDeadInfo)) == mergedDeadInfoMap.end()) {
+            mergedDeadInfoMap[tmpMergedDeadInfo] = mapIt->second;
+        } else {
+            tmpIt->second += mapIt->second;
+        }
+
 	    //drcctlib_get_full_cct(context_handle_t ctxt_hndl, int max_depth);
-	    if (ctxt1 == 0) {
+	    
+        /*
+        if (ctxt1 == 0) {
 	        dr_fprintf(gTraceFile, "context 1 is 0\n");
 	    } else {
 	        drcctlib_print_full_cct(gTraceFile, ctxt1, true, false, -1);
-            dr_fprintf(gTraceFile, "=====================================\n")
+            dr_fprintf(gTraceFile, "=====================================\n");
 	    }
-	    //map<MergedDeadInfo, uint64_t>::iterator tmpIt;
-	    //auto tmpIt;
-	    //if (tmpIt = mergedDeadInfoMap)
 
-	    //drcctlib_print_full_cct(gTraceFile, MAX_CLIENT_CCT_PRINT_DEPTH);
+	    drcctlib_print_full_cct(gTraceFile, MAX_CLIENT_CCT_PRINT_DEPTH);
+        */
     }
+
+    // clear dead map now
+    DeadMap.clear();
+    map<MergedDeadInfo, uint64_t>::iterator it = mergedDeadInfoMap.begin();
+    list<DeadInfoForPresentation> deadList;
+
+    for (; it != mergedDeadInfoMap.end(); it++) {
+        DeadInfoForPresentation deadInfoForPresentation;
+        deadInfoForPresentation.pMergedDeadInfo = &(it->first);
+        deadInfoForPresentation.count = it->second;
+        deadList.push_back(deadInfoForPresentation);
+        //dr_fprintf(gTraceFile, "deadInfoForPresentation\n");
+    }
+    
+    deadList.sort(MergedDeadInfoComparer);
+    list<DeadInfoForPresentation>::iterator dipIter = deadList.begin();
+    //PIN_LockClient();
+    uint64_t deads = 0;
+
+    for (; dipIter != deadList.end(); dipIter++) {
+        //print MAX_DEAD_CONTEXTS_TO_LOG contexts
+        if (deads < MAX_DEAD_CONTEXTS_TO_LOG) {
+            // TODO
+            PrintIPAndCallingContexts(*dipIter);
+        }
+
+        deads++;
+    }
+
+
+
+
     
     
     dr_fprintf(gTraceFile, "ClientExit\n");
