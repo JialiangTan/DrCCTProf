@@ -31,7 +31,7 @@ using namespace std;
                                           ##_ARGS)
 
 #define MAX_CLIENT_CCT_PRINT_DEPTH 3
-#define MAX_DEAD_CONTEXTS_TO_LOG 10
+#define MAX_DEAD_CONTEXTS_TO_LOG 100
 
 static int tls_idx;
 static file_t gTraceFile;
@@ -1097,9 +1097,9 @@ void
 PrintIPAndCallingContexts(const DeadInfoForPresentation &di) {
     dr_fprintf(gTraceFile, "di.count is: %lu\n", di.count);
     dr_fprintf(gTraceFile, "--------------------------------\n");
-    drcctlib_print_full_cct(gTraceFile, di.pMergedDeadInfo->context1, true, false, -1);
+    drcctlib_print_backtrace(gTraceFile, di.pMergedDeadInfo->context1, false, true, -1);
     dr_fprintf(gTraceFile, "***************\n");
-    drcctlib_print_full_cct(gTraceFile, di.pMergedDeadInfo->context2, true, false, -1);
+    drcctlib_print_backtrace(gTraceFile, di.pMergedDeadInfo->context2, false, true, -1);
     dr_fprintf(gTraceFile, "--------------------------------\n");
 }
 
@@ -1186,21 +1186,19 @@ ClientExit(void)
             // TODO
             PrintIPAndCallingContexts(*dipIter);
         }
-
+        gTotalDead += dipIter->count;
         deads++;
     }
 
-
-
-
-    
-    
     dr_fprintf(gTraceFile, "ClientExit\n");
     uint64_t measurementBaseCount = 1.09;
-
     dr_fprintf(gTraceFile, "#deads\n");
     dr_fprintf(gTraceFile, "GrandTotalWrites = %d\n", measurementBaseCount);
-    // add output module here
+    
+    mergedDeadInfoMap.clear();
+    deadList.clear();
+
+    // PIN_UnlockClient();
     drcctlib_exit();
 
     if (!dr_raw_tls_cfree(tls_offs, INSTRACE_TLS_COUNT)) {
