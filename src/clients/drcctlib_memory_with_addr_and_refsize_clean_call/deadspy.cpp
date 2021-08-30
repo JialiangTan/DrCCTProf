@@ -1070,7 +1070,7 @@ static void
 ClientInit(int argc, const char *argv[])
 {
     char name[MAXIMUM_PATH] = "";
-    DRCCTLIB_INIT_LOG_FILE_NAME(name, "test", "out");
+    DRCCTLIB_INIT_LOG_FILE_NAME(name, "dead", "out");
     
     gTraceFile = dr_open_file(name, DR_FILE_WRITE_OVERWRITE | DR_FILE_ALLOW_LARGE);
     DR_ASSERT(gTraceFile != INVALID_FILE);
