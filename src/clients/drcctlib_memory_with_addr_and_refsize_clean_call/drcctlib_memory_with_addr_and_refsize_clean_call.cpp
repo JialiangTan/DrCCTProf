@@ -5,6 +5,9 @@
  */
 
 #include <cstddef>
+#include <unordered_map>
+#include <sys/mman.h>
+
 
 #include "dr_api.h"
 #include "drmgr.h"
@@ -19,6 +22,45 @@
                                           ##_ARGS)
 
 static int tls_idx;
+
+// __thread bool Sample_flag = true;
+// __thread long long NUM_INS = 0;
+thread_local bool Sample_flag = true;
+thread_local long long NUM_INS = 0;
+
+#define TLS_MEM_REF_BUFF_SIZE 100
+#define WINDOW_ENABLE 1000000
+#define WINDOW_DISABLE 1000000000
+#define MAX_WRITE_OP_LENGTH (512)
+#define MAX_WRITE_OPS_IN_INS (8)
+
+/* infrastructure for shadow memory */
+/* MACROs */
+// 64KB shadow pages
+#define PAGE_OFFSET_BITS (16LL)
+#define PAGE_OFFSET(addr) ( addr & 0xFFFF)
+#define PAGE_OFFSET_MASK ( 0xFFFF)
+
+#define PAGE_SIZE (1 << PAGE_OFFSET_BITS)
+
+// 2 level page table
+#define PTR_SIZE (sizeof(struct Status *))
+#define LEVEL_1_PAGE_TABLE_BITS  (20)
+#define LEVEL_1_PAGE_TABLE_ENTRIES  (1 << LEVEL_1_PAGE_TABLE_BITS )
+#define LEVEL_1_PAGE_TABLE_SIZE  (LEVEL_1_PAGE_TABLE_ENTRIES * PTR_SIZE )
+
+#define LEVEL_2_PAGE_TABLE_BITS  (12)
+#define LEVEL_2_PAGE_TABLE_ENTRIES  (1 << LEVEL_2_PAGE_TABLE_BITS )
+#define LEVEL_2_PAGE_TABLE_SIZE  (LEVEL_2_PAGE_TABLE_ENTRIES * PTR_SIZE )
+
+#define LEVEL_1_PAGE_TABLE_SLOT(addr) (((addr) >> (LEVEL_2_PAGE_TABLE_BITS + PAGE_OFFSET_BITS)) & 0xfffff)
+#define LEVEL_2_PAGE_TABLE_SLOT(addr) (((addr) >> (PAGE_OFFSET_BITS)) & 0xFFF)
+
+#define IS_ACCESS_WITHIN_PAGE_BOUNDARY(accessAddr, accessLen) (PAGE_OFFSET((accessAddr)) <= (PAGE_OFFSET_MASK - (accessLen)))
+
+static file_t gTraceFile;
+static uint8_t** gL1PageTable[LEVEL_1_PAGE_TABLE_SIZE];
+
 
 enum {
     INSTRACE_TLS_OFFS_BUF_PTR,
@@ -45,25 +87,158 @@ typedef struct _per_thread_t {
     void *cur_buf;
 } per_thread_t;
 
-#define TLS_MEM_REF_BUFF_SIZE 100
+typedef struct AddrValPair {
+    void *address;
+    uint8_t value[MAX_WRITE_OP_LENGTH];
+} AddrValPair;
+
+typedef struct RedSpyThreadData {
+    AddrValPair buffer[MAX_WRITE_OPS_IN_INS];
+    uint64_t bytesWritten;
+} RedSpyThreadData;
+
+
+// to access thread-specific data
+inline RedSpyThreadData* ClientGetTLS(void *drcontext){
+    RedSpyThreadData *tdata = static_cast<RedSpyThreadData*>(drmgr_get_tls_field(drcontext, tls_idx));
+    return tdata;
+}
+
+template<int start, int end, int incr>
+struct UnrolledConjunction{
+    static bool Body(function<bool (const int)> func){
+        return func(start) && UnrolledConjunction<start+incr, end, incr>::Body(func); // unroll next iteration
+    }
+};
+
+/*
+#define HANDLE_CASE(NUM, BUFFER_INDEX) \
+case(NUM): {RedSpyAnalysis<(NUM), (BUFFER_INDEX)>::RecordNByteValueBeforeWrite;\
+RedSpyAnalysis<(NUM), (BUFFER_INDEX)>::CheckNByteValueAfterWrite;} break
+*/
+
+static uint8_t* GetOrCreateShadowBaseAddress(uint64_t addr){
+    uint8_t *shadowPage;
+    uint8_t** *l1Ptr = &gL1PageTable[LEVEL_1_PAGE_TABLE_SLOT(addr)];
+    if(*l1Ptr == 0){
+        *l1Ptr = (uint8_t**)mmap(0, LEVEL_2_PAGE_TABLE_SIZE, PROT_WRITE | PROT_READ, MAP_NORESERVE | MAP_PRIVATE | MAP_ANONYMOUS, 0, 0);
+        shadowPage = (*l1Ptr)[LEVEL_2_PAGE_TABLE_SLOT(addr)] = (uint8_t*) mmap(0, PAGE_SIZE * (sizeof(uint64_t)), PROT_WRITE | PROT_READ, MAP_NORESERVE | MAP_PRIVATE | MAP_ANONYMOUS, 0, 0);
+    }else if((shadowPage = (*l1Ptr)[LEVEL_2_PAGE_TABLE_SLOT(addr)]) == 0 ){
+        shadowPage = (*l1Ptr)[LEVEL_2_PAGE_TABLE_SLOT(addr)] = (uint8_t*) mmap(0, PAGE_SIZE * (sizeof(uint64_t)), PROT_WRITE | PROT_READ, MAP_NORESERVE | MAP_PRIVATE | MAP_ANONYMOUS, 0, 0);
+    }
+    return shadowPage;
+}
+
+
+template<uint16_t AccessLen, uint32_t bufferOffset>
+struct RedSpyAnalysis{
+    static bool IsWriteRedundant(void * &addr, void *drcontext){
+        RedSpyThreadData* const tData = ClientGetTLS(drcontext);
+        dr_fprintf(gTraceFile, "tData: %p\n", tData);
+        dr_fprintf(gTraceFile, "Here");
+        AddrValPair *avPair = & tData->buffer[bufferOffset];
+        addr = avPair->address;
+        switch(AccessLen){
+            case 1: return *((uint8_t*)(&avPair->value)) == *(static_cast<uint8_t*>(avPair->address));
+            case 2: return *((uint16_t*)(&avPair->value)) == *(static_cast<uint16_t*>(avPair->address));
+            case 4: return *((uint32_t*)(&avPair->value)) == *(static_cast<uint32_t*>(avPair->address));
+            case 8: return *((uint64_t*)(&avPair->value)) == *(static_cast<uint64_t*>(avPair->address));
+            default: return memcmp(&avPair->value, avPair->address, AccessLen) == 0;
+        }
+        //return true;
+    }
+
+    static void RecordNByteValueBeforeWrite(void *addr, void *drcontext){
+        if(Sample_flag){
+            NUM_INS++;
+            if(NUM_INS > WINDOW_ENABLE){
+                Sample_flag = false;
+                NUM_INS = 0;
+                return;
+            }
+        }else{
+            NUM_INS++;
+            if(NUM_INS > WINDOW_DISABLE){
+                Sample_flag = true;
+                NUM_INS = 0;
+            }else{
+                return;
+            }
+        }
+        RedSpyThreadData* const tData = ClientGetTLS(drcontext);
+        tData->bytesWritten +=AccessLen;
+        AddrValPair *avPair = & tData->buffer[bufferOffset];
+        avPair->address = addr;
+        switch(AccessLen){
+            case 1: *((uint8_t*)(&avPair->value)) = *(static_cast<uint8_t*>(addr)); break;
+            case 2: *((uint16_t*)(&avPair->value)) = *(static_cast<uint16_t*>(addr)); break;
+            case 4: *((uint32_t*)(&avPair->value)) = *(static_cast<uint32_t*>(addr)); break;
+            case 8: *((uint64_t*)(&avPair->value)) = *(static_cast<uint64_t*>(addr)); break;
+            default: memcmp(&avPair->value, addr, AccessLen);
+        }
+    }
+
+    static void CheckNByteValueAfterWrite(void *drcontext, context_handle_t cur_ctxt_hndl){
+        if(!Sample_flag){
+            return;
+        }
+        void *addr;
+        bool isRedundantWrite = IsWriteRedundant(addr, drcontext);
+        uint8_t *status = GetOrCreateShadowBaseAddress((uint64_t)addr);
+        //context_handle_t* __restrict__ prevIP = (ContextHandle_t*)(status + PAGE_OFFSET((uint64_t)addr) * sizeof(ContextHandle_t));
+        //uint32_t *prevIP = (uint32_t *)(status + PAGE_OFFSET((uint64_t)addr) * sizeof(uint32_t));  
+        context_handle_t *prevIP = (context_handle_t*)(status + PAGE_OFFSET((uint64_t)addr) * sizeof(context_handle_t));  
+        const bool isAccessWithinPageBoundary = IS_ACCESS_WITHIN_PAGE_BOUNDARY((uint64_t)addr, AccessLen);
+        if(isRedundantWrite){
+            // detected redundancy
+            if(isAccessWithinPageBoundary) {
+                // all from the same ctxt?
+                if(UnrolledConjunction<0, AccessLen, 1>::Body([&](int index) -> bool {return (prevIP[index] == prevIP[0]); })) {
+                    // report in RedTable
+                    //TODO
+                }
+            }
+        }
+
+    }
+};
+
+
+template<uint32_t readBufferSlotIndex>
+struct RedSpyInstrument{
+    static void InstrumentReadValueBeforeAndAfterWriting(void *drcontext, context_handle_t cur_ctxt_hndl, mem_ref_t *ref){
+        uint32_t refSize = ref->size;
+        switch(refSize) {
+            //HANDLE_CASE(1, readBufferSlotIndex);
+        }
+
+    }
+};
+
 
 // client want to do
 void
-DoWhatClientWantTodo(void *drcontext, context_handle_t cur_ctxt_hndl, mem_ref_t *ref)
+DoWhatClientWantTodo(void *drcontext, context_handle_t cur_ctxt_hndl, mem_ref_t *ref, int32_t op)
 {
     // add online analysis here
+    void *addr = ref->addr;
+    int size = ref->size;
     
 }
 // dr clean call
 void
-InsertCleancall(int32_t slot,int32_t num)
+InsertCleancall(int32_t slot,int32_t num, int32_t op)
 {
     void *drcontext = dr_get_current_drcontext();
     per_thread_t *pt = (per_thread_t *)drmgr_get_tls_field(drcontext, tls_idx);
     context_handle_t cur_ctxt_hndl = drcctlib_get_context_handle(drcontext, slot);
+
+    // Special case, if we have only one write operant
+    // TODO
+
     for (int i = 0; i < num; i++) {
         if (pt->cur_buf_list[i].addr != 0) {
-            DoWhatClientWantTodo(drcontext, cur_ctxt_hndl, &pt->cur_buf_list[i]);
+            DoWhatClientWantTodo(drcontext, cur_ctxt_hndl, &pt->cur_buf_list[i], op);
         }
     }
     BUF_PTR(pt->cur_buf, mem_ref_t, INSTRACE_TLS_OFFS_BUF_PTR) = pt->cur_buf_list;
@@ -131,6 +306,9 @@ InstrumentMem(void *drcontext, instrlist_t *ilist, instr_t *where, opnd_t ref)
     }
 }
 
+//static int GetNumWriteOperandsInIns(){ 
+//};
+
 // analysis
 void
 InstrumentInsCallback(void *drcontext, instr_instrument_msg_t *instrument_msg)
@@ -139,21 +317,39 @@ InstrumentInsCallback(void *drcontext, instr_instrument_msg_t *instrument_msg)
     instrlist_t *bb = instrument_msg->bb;
     instr_t *instr = instrument_msg->instr;
     int32_t slot = instrument_msg->slot;
+
+#ifdef x86_CCTLIB
+    if (drreg_reserve_aflags(drcontext, bb, instr) != DRREG_SUCCESS) {
+        DRCCTLIB_EXIT_PROCESS("instrument_before_every_instr_meta_instr "
+                              "drreg_reserve_aflags != DRREG_SUCCESS");
+    }
+#endif
+
     int num = 0;
+    int op = 0; //read is 0, write is 1
     for (int i = 0; i < instr_num_srcs(instr); i++) {
         if (opnd_is_memory_reference(instr_get_src(instr, i))) {
             num++;
             InstrumentMem(drcontext, bb, instr, instr_get_src(instr, i));
         }
     }
+    dr_insert_clean_call(drcontext, bb, instr, (void *)InsertCleancall, false, 3,
+                         OPND_CREATE_CCT_INT(slot), OPND_CREATE_CCT_INT(num), OPND_CREATE_CCT_INT(op));
+
     for (int i = 0; i < instr_num_dsts(instr); i++) {
         if (opnd_is_memory_reference(instr_get_dst(instr, i))) {
             num++;
+            op = 1;
             InstrumentMem(drcontext, bb, instr, instr_get_dst(instr, i));
         }
     }
-    dr_insert_clean_call(drcontext, bb, instr, (void *)InsertCleancall, false, 2,
-                         OPND_CREATE_CCT_INT(slot), OPND_CREATE_CCT_INT(num));
+#ifdef x86_CCTLIB
+    if (drreg_unreserve_aflags(drcontext, bb, instr) != DRREG_SUCCESS) {
+        DRCCTLIB_EXIT_PROCESS("drreg_unreserve_aflags != DRREG_SUCCESS");
+    }
+#endif
+    dr_insert_clean_call(drcontext, bb, instr, (void *)InsertCleancall, false, 3,
+                         OPND_CREATE_CCT_INT(slot), OPND_CREATE_CCT_INT(num), OPND_CREATE_CCT_INT(op));
 }
 
 static void
@@ -182,6 +378,11 @@ ClientThreadEnd(void *drcontext)
 static void
 ClientInit(int argc, const char *argv[])
 {
+    char name[MAXIMUM_PATH] = "";
+    DRCCTLIB_INIT_LOG_FILE_NAME(name, "test", "out");
+    gTraceFile = dr_open_file(name, DR_FILE_WRITE_OVERWRITE | DR_FILE_ALLOW_LARGE);
+    DR_ASSERT(gTraceFile != INVALID_FILE);
+    dr_fprintf(gTraceFile, "ClientInit\n");
     
 }
 
@@ -189,6 +390,8 @@ static void
 ClientExit(void)
 {
     // add output module here
+    dr_fprintf(gTraceFile, "ClientExit\n");
+
     drcctlib_exit();
 
     if (!dr_raw_tls_cfree(tls_offs, INSTRACE_TLS_COUNT)) {
