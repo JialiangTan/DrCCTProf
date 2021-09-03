@@ -5,15 +5,22 @@
  */
 
 #include <cstddef>
+#include <stdio.h>
+#include <stdlib.h>
+#include <stdint.h>
+#include <iostream>
+#include <unistd.h>
 #include <unordered_map>
 #include <sys/mman.h>
-
+#include <functional>
 
 #include "dr_api.h"
 #include "drmgr.h"
 #include "drreg.h"
 #include "drutil.h"
 #include "drcctlib.h"
+
+using namespace std;
 
 #define DRCCTLIB_PRINTF(_FORMAT, _ARGS...) \
     DRCCTLIB_PRINTF_TEMPLATE("memory_with_addr_and_refsize_clean_call", _FORMAT, ##_ARGS)
@@ -33,6 +40,7 @@ thread_local long long NUM_INS = 0;
 #define WINDOW_DISABLE 1000000000
 #define MAX_WRITE_OP_LENGTH (512)
 #define MAX_WRITE_OPS_IN_INS (8)
+#define THREAD_MAX (1024)
 
 /* infrastructure for shadow memory */
 /* MACROs */
@@ -57,6 +65,8 @@ thread_local long long NUM_INS = 0;
 #define LEVEL_2_PAGE_TABLE_SLOT(addr) (((addr) >> (PAGE_OFFSET_BITS)) & 0xFFF)
 
 #define IS_ACCESS_WITHIN_PAGE_BOUNDARY(accessAddr, accessLen) (PAGE_OFFSET((accessAddr)) <= (PAGE_OFFSET_MASK - (accessLen)))
+
+#define MAKE_CONTEXT_PAIR(a, b) (((uint64_t)(a) << 32) | ((uint64_t)(b)))
 
 static file_t gTraceFile;
 static uint8_t** gL1PageTable[LEVEL_1_PAGE_TABLE_SIZE];
@@ -97,6 +107,22 @@ typedef struct RedSpyThreadData {
     uint64_t bytesWritten;
 } RedSpyThreadData;
 
+static unordered_map<uint64_t, uint64_t> RedMap[THREAD_MAX];
+static void AddToRedTable(uint64_t key, uint16_t value, int threadID){
+#ifdef MULTI_THREADED
+    //LOCK_RED_MAP();
+#endif
+    unordered_map<uint64_t, uint64_t>::iterator it = RedMap[threadID].find(key);
+    if (it == RedMap[threadID].end()) {
+        RedMap[threadID][key] = value;
+    } else {
+        it->second += value;
+    }
+#ifdef MULTI_THREADED
+    //UNLOCK_RED_MAP();
+#endif
+}
+
 
 // to access thread-specific data
 inline RedSpyThreadData* ClientGetTLS(void *drcontext){
@@ -108,6 +134,13 @@ template<int start, int end, int incr>
 struct UnrolledConjunction{
     static bool Body(function<bool (const int)> func){
         return func(start) && UnrolledConjunction<start+incr, end, incr>::Body(func); // unroll next iteration
+    }
+};
+
+template<int end, int incr>
+struct UnrolledConjunction<end, end, incr>{
+    static bool Body(function<void (const int)> func){
+        return true;
     }
 };
 
@@ -133,6 +166,7 @@ static uint8_t* GetOrCreateShadowBaseAddress(uint64_t addr){
 template<uint16_t AccessLen, uint32_t bufferOffset>
 struct RedSpyAnalysis{
     static bool IsWriteRedundant(void * &addr, void *drcontext){
+        //int threadid = drcctlib_get_thread_id();
         RedSpyThreadData* const tData = ClientGetTLS(drcontext);
         dr_fprintf(gTraceFile, "tData: %p\n", tData);
         dr_fprintf(gTraceFile, "Here");
@@ -187,15 +221,17 @@ struct RedSpyAnalysis{
         uint8_t *status = GetOrCreateShadowBaseAddress((uint64_t)addr);
         //context_handle_t* __restrict__ prevIP = (ContextHandle_t*)(status + PAGE_OFFSET((uint64_t)addr) * sizeof(ContextHandle_t));
         //uint32_t *prevIP = (uint32_t *)(status + PAGE_OFFSET((uint64_t)addr) * sizeof(uint32_t));  
+        // context_handle_t = uint32_t;
         context_handle_t *prevIP = (context_handle_t*)(status + PAGE_OFFSET((uint64_t)addr) * sizeof(context_handle_t));  
         const bool isAccessWithinPageBoundary = IS_ACCESS_WITHIN_PAGE_BOUNDARY((uint64_t)addr, AccessLen);
         if(isRedundantWrite){
             // detected redundancy
             if(isAccessWithinPageBoundary) {
                 // all from the same ctxt?
-                if(UnrolledConjunction<0, AccessLen, 1>::Body([&](int index) -> bool {return (prevIP[index] == prevIP[0]); })) {
+                if(UnrolledConjunction<0, AccessLen, 1>::Body([&](int index) -> bool { return (prevIP[index] == prevIP[0]); })) {
                     // report in RedTable
-                    //TODO
+                    int threadID = drcctlib_get_thread_id();
+                    //AddToRedTable();
                 }
             }
         }
@@ -203,13 +239,20 @@ struct RedSpyAnalysis{
     }
 };
 
-
 template<uint32_t readBufferSlotIndex>
 struct RedSpyInstrument{
-    static void InstrumentReadValueBeforeAndAfterWriting(void *drcontext, context_handle_t cur_ctxt_hndl, mem_ref_t *ref){
-        uint32_t refSize = ref->size;
+    static void InstrumentReadValueBeforeAndAfterWriting(void *drcontext, context_handle_t cur_ctxt_hndl, uint32_t refSize){
+        //uint32_t refSize = ref->size;
         switch(refSize) {
-            //HANDLE_CASE(1, readBufferSlotIndex);
+            /*
+            HANDLE_CASE(1, readBufferSlotIndex);
+            HANDLE_CASE(2, readBufferSlotIndex);
+            HANDLE_CASE(4, readBufferSlotIndex);
+            HANDLE_CASE(8, readBufferSlotIndex);
+            HANDLE_CASE(10, readBufferSlotIndex);
+            HANDLE_CASE(16, readBufferSlotIndex);
+            default: {}
+            */
         }
 
     }
@@ -218,13 +261,50 @@ struct RedSpyInstrument{
 
 // client want to do
 void
-DoWhatClientWantTodo(void *drcontext, context_handle_t cur_ctxt_hndl, mem_ref_t *ref, int32_t op)
+DoWhatClientWantTodo(void *drcontext, context_handle_t cur_ctxt_hndl, mem_ref_t *ref, int32_t op, int32_t num)
 {
     // add online analysis here
     void *addr = ref->addr;
-    int size = ref->size;
+    uint32_t refSize = ref->size;
+    dr_fprintf(gTraceFile, "num = %d\n", num);
+    /*if (num == 1){
+        RedSpyInstrument<0>::InstrumentReadValueBeforeAndAfterWriting(drcontext, cur_ctxt_hndl, refSize);
+        dr_fprintf(gTraceFile, "num = 1\n");
+        return;
+    }*/
     
+    int readBufferSlotIndex = 0;
+    dr_fprintf(gTraceFile, "Before switch\n");
+    switch(readBufferSlotIndex){
+        case 0:
+            // Read the value at location before and after the instruction
+            RedSpyInstrument<0>::InstrumentReadValueBeforeAndAfterWriting(drcontext, cur_ctxt_hndl, refSize);
+            dr_fprintf(gTraceFile, "Case 0\n");
+            break;
+        case 1:
+            RedSpyInstrument<1>::InstrumentReadValueBeforeAndAfterWriting(drcontext, cur_ctxt_hndl, refSize);
+            dr_fprintf(gTraceFile, "Case 1\n");
+            break;
+        case 2:
+            RedSpyInstrument<2>::InstrumentReadValueBeforeAndAfterWriting(drcontext, cur_ctxt_hndl, refSize);
+            dr_fprintf(gTraceFile, "Case 2\n");
+            break;
+        case 3:
+            RedSpyInstrument<3>::InstrumentReadValueBeforeAndAfterWriting(drcontext, cur_ctxt_hndl, refSize);
+            dr_fprintf(gTraceFile, "Case 3\n");
+            break;
+        case 4:
+            RedSpyInstrument<4>::InstrumentReadValueBeforeAndAfterWriting(drcontext, cur_ctxt_hndl, refSize);
+            dr_fprintf(gTraceFile, "Case 4\n");
+            break;
+        default:
+            //assert(0 && "NYI");
+            break;
+    }
+    // use next slot for the next write operand
+    readBufferSlotIndex++;   
 }
+
 // dr clean call
 void
 InsertCleancall(int32_t slot,int32_t num, int32_t op)
@@ -238,7 +318,7 @@ InsertCleancall(int32_t slot,int32_t num, int32_t op)
 
     for (int i = 0; i < num; i++) {
         if (pt->cur_buf_list[i].addr != 0) {
-            DoWhatClientWantTodo(drcontext, cur_ctxt_hndl, &pt->cur_buf_list[i], op);
+            DoWhatClientWantTodo(drcontext, cur_ctxt_hndl, &pt->cur_buf_list[i], op, num);
         }
     }
     BUF_PTR(pt->cur_buf, mem_ref_t, INSTRACE_TLS_OFFS_BUF_PTR) = pt->cur_buf_list;
