@@ -8,6 +8,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdint.h>
+#include <string.h>
 #include <iostream>
 #include <unistd.h>
 #include <unordered_map>
@@ -144,11 +145,11 @@ struct UnrolledConjunction<end, end, incr>{
     }
 };
 
-/*
+
 #define HANDLE_CASE(NUM, BUFFER_INDEX) \
-case(NUM): {RedSpyAnalysis<(NUM), (BUFFER_INDEX)>::RecordNByteValueBeforeWrite;\
-RedSpyAnalysis<(NUM), (BUFFER_INDEX)>::CheckNByteValueAfterWrite;} break
-*/
+case(NUM): {RedSpyAnalysis<(NUM), (BUFFER_INDEX)>::RecordNByteValueBeforeWrite(tmp, drcontext); \
+RedSpyAnalysis<(NUM), (BUFFER_INDEX)>::CheckNByteValueAfterWrite(drcontext, cur_ctxt_hndl); } break 
+
 
 static uint8_t* GetOrCreateShadowBaseAddress(uint64_t addr){
     uint8_t *shadowPage;
@@ -182,7 +183,7 @@ struct RedSpyAnalysis{
         //return true;
     }
 
-    static void RecordNByteValueBeforeWrite(void *addr, void *drcontext){
+    static void RecordNByteValueBeforeWrite(void* addr, void* drcontext){
         if(Sample_flag){
             NUM_INS++;
             if(NUM_INS > WINDOW_ENABLE){
@@ -199,6 +200,8 @@ struct RedSpyAnalysis{
                 return;
             }
         }
+        // TODO
+        /*
         RedSpyThreadData* const tData = ClientGetTLS(drcontext);
         tData->bytesWritten +=AccessLen;
         AddrValPair *avPair = & tData->buffer[bufferOffset];
@@ -209,10 +212,10 @@ struct RedSpyAnalysis{
             case 4: *((uint32_t*)(&avPair->value)) = *(static_cast<uint32_t*>(addr)); break;
             case 8: *((uint64_t*)(&avPair->value)) = *(static_cast<uint64_t*>(addr)); break;
             default: memcmp(&avPair->value, addr, AccessLen);
-        }
+        }*/
     }
 
-    static void CheckNByteValueAfterWrite(void *drcontext, context_handle_t cur_ctxt_hndl){
+    static void CheckNByteValueAfterWrite(void* drcontext, context_handle_t cur_ctxt_hndl){
         if(!Sample_flag){
             return;
         }
@@ -241,73 +244,90 @@ struct RedSpyAnalysis{
 
 template<uint32_t readBufferSlotIndex>
 struct RedSpyInstrument{
-    static void InstrumentReadValueBeforeAndAfterWriting(void *drcontext, context_handle_t cur_ctxt_hndl, uint32_t refSize){
+    static void InstrumentReadValueBeforeAndAfterWriting(void *drcontext, context_handle_t cur_ctxt_hndl, uint32_t refSize, uint32_t whichOp){
+        dr_fprintf(gTraceFile, "size = %d\n", refSize);
         //uint32_t refSize = ref->size;
+        dr_fprintf(gTraceFile, "whiOp = %d\n", whichOp);
+        void *tmp;
+        tmp = &whichOp;
+        dr_fprintf(gTraceFile, "tmp = %p\n", tmp);
         switch(refSize) {
-            /*
             HANDLE_CASE(1, readBufferSlotIndex);
             HANDLE_CASE(2, readBufferSlotIndex);
             HANDLE_CASE(4, readBufferSlotIndex);
             HANDLE_CASE(8, readBufferSlotIndex);
             HANDLE_CASE(10, readBufferSlotIndex);
             HANDLE_CASE(16, readBufferSlotIndex);
-            default: {}
-            */
+            default: {
+                //RecordValueBeforeLargeWrite();
+                //CheckAfterLargeWrite();
+            }
         }
-
     }
 };
 
 
 // client want to do
 void
-DoWhatClientWantTodo(void *drcontext, context_handle_t cur_ctxt_hndl, mem_ref_t *ref, int32_t op, int32_t num)
+DoWhatClientWantTodo(void *drcontext, context_handle_t cur_ctxt_hndl, mem_ref_t *ref, int32_t op, int32_t num, int32_t num_read, int32_t num_write)
 {
     // add online analysis here
     void *addr = ref->addr;
     uint32_t refSize = ref->size;
-    dr_fprintf(gTraceFile, "num = %d\n", num);
-    /*if (num == 1){
-        RedSpyInstrument<0>::InstrumentReadValueBeforeAndAfterWriting(drcontext, cur_ctxt_hndl, refSize);
-        dr_fprintf(gTraceFile, "num = 1\n");
+    uint32_t whichOp =  num;
+    //dr_fprintf(gTraceFile, "whichOp = %d\n", whichOp);
+    //dr_fprintf(gTraceFile, "whichOp = %d\n", num);
+    dr_fprintf(gTraceFile, "num_read = %d, num_write = %d\n", num_read, num_write);
+    dr_fprintf(gTraceFile, "op %d\n", op);
+    dr_fprintf(gTraceFile, "total num = %d\n", num);
+    if (num_write == 1){
+        RedSpyInstrument<0>::InstrumentReadValueBeforeAndAfterWriting(drcontext, cur_ctxt_hndl, refSize, whichOp);
         return;
-    }*/
-    
-    int readBufferSlotIndex = 0;
-    dr_fprintf(gTraceFile, "Before switch\n");
-    switch(readBufferSlotIndex){
-        case 0:
-            // Read the value at location before and after the instruction
-            RedSpyInstrument<0>::InstrumentReadValueBeforeAndAfterWriting(drcontext, cur_ctxt_hndl, refSize);
-            dr_fprintf(gTraceFile, "Case 0\n");
-            break;
-        case 1:
-            RedSpyInstrument<1>::InstrumentReadValueBeforeAndAfterWriting(drcontext, cur_ctxt_hndl, refSize);
-            dr_fprintf(gTraceFile, "Case 1\n");
-            break;
-        case 2:
-            RedSpyInstrument<2>::InstrumentReadValueBeforeAndAfterWriting(drcontext, cur_ctxt_hndl, refSize);
-            dr_fprintf(gTraceFile, "Case 2\n");
-            break;
-        case 3:
-            RedSpyInstrument<3>::InstrumentReadValueBeforeAndAfterWriting(drcontext, cur_ctxt_hndl, refSize);
-            dr_fprintf(gTraceFile, "Case 3\n");
-            break;
-        case 4:
-            RedSpyInstrument<4>::InstrumentReadValueBeforeAndAfterWriting(drcontext, cur_ctxt_hndl, refSize);
-            dr_fprintf(gTraceFile, "Case 4\n");
-            break;
-        default:
-            //assert(0 && "NYI");
-            break;
     }
-    // use next slot for the next write operand
-    readBufferSlotIndex++;   
+    
+    dr_fprintf(gTraceFile, "before switch, whichOp = %d\n", whichOp);
+    int readBufferSlotIndex = 0;
+    //uint32_t memOperands = num1 + num2;
+    for(int32_t memOp = 0; memOp < num; memOp++){
+        dr_fprintf(gTraceFile, "readBufferSlotIndex = %d\n", readBufferSlotIndex);
+        if(op == 0)//read is 0, write is 1
+            continue;
+        
+        //dr_fprintf(gTraceFile, "Before switch\n");
+        switch(readBufferSlotIndex){
+            case 0:
+                // Read the value at location before and after the instruction
+                RedSpyInstrument<0>::InstrumentReadValueBeforeAndAfterWriting(drcontext, cur_ctxt_hndl, refSize, whichOp);
+                dr_fprintf(gTraceFile, "Case 0\n");
+                break;
+            case 1:
+                RedSpyInstrument<1>::InstrumentReadValueBeforeAndAfterWriting(drcontext, cur_ctxt_hndl, refSize, whichOp);
+                dr_fprintf(gTraceFile, "Case 1\n");
+                break;
+            case 2:
+                RedSpyInstrument<2>::InstrumentReadValueBeforeAndAfterWriting(drcontext, cur_ctxt_hndl, refSize, whichOp);
+                dr_fprintf(gTraceFile, "Case 2\n");
+                break;
+            case 3:
+                RedSpyInstrument<3>::InstrumentReadValueBeforeAndAfterWriting(drcontext, cur_ctxt_hndl, refSize, whichOp);
+                dr_fprintf(gTraceFile, "Case 3\n");
+                break;
+            case 4:
+                RedSpyInstrument<4>::InstrumentReadValueBeforeAndAfterWriting(drcontext, cur_ctxt_hndl, refSize, whichOp);
+                dr_fprintf(gTraceFile, "Case 4\n");
+                break;
+            default:
+                //assert(0 && "NYI");
+                break;
+        }
+        // use next slot for the next write operand
+        readBufferSlotIndex++;   
+    }
 }
 
 // dr clean call
 void
-InsertCleancall(int32_t slot,int32_t num, int32_t op)
+InsertCleancall(int32_t slot, int32_t num, int32_t num_read, int32_t num_write, int32_t op)
 {
     void *drcontext = dr_get_current_drcontext();
     per_thread_t *pt = (per_thread_t *)drmgr_get_tls_field(drcontext, tls_idx);
@@ -318,7 +338,7 @@ InsertCleancall(int32_t slot,int32_t num, int32_t op)
 
     for (int i = 0; i < num; i++) {
         if (pt->cur_buf_list[i].addr != 0) {
-            DoWhatClientWantTodo(drcontext, cur_ctxt_hndl, &pt->cur_buf_list[i], op, num);
+            DoWhatClientWantTodo(drcontext, cur_ctxt_hndl, &pt->cur_buf_list[i], op, num, num_read, num_write);
         }
     }
     BUF_PTR(pt->cur_buf, mem_ref_t, INSTRACE_TLS_OFFS_BUF_PTR) = pt->cur_buf_list;
@@ -406,19 +426,23 @@ InstrumentInsCallback(void *drcontext, instr_instrument_msg_t *instrument_msg)
 #endif
 
     int num = 0;
+    int num_read = 0;
+    int num_write = 0;
     int op = 0; //read is 0, write is 1
     for (int i = 0; i < instr_num_srcs(instr); i++) {
-        if (opnd_is_memory_reference(instr_get_src(instr, i))) {
+        if (opnd_is_memory_reference(instr_get_src(instr, i))) { //src = read
             num++;
+            num_read++;
             InstrumentMem(drcontext, bb, instr, instr_get_src(instr, i));
         }
     }
-    dr_insert_clean_call(drcontext, bb, instr, (void *)InsertCleancall, false, 3,
-                         OPND_CREATE_CCT_INT(slot), OPND_CREATE_CCT_INT(num), OPND_CREATE_CCT_INT(op));
+    dr_insert_clean_call(drcontext, bb, instr, (void *)InsertCleancall, false, 5,
+                         OPND_CREATE_CCT_INT(slot), OPND_CREATE_CCT_INT(num), OPND_CREATE_CCT_INT(num_read), OPND_CREATE_CCT_INT(num_write), OPND_CREATE_CCT_INT(op));
 
     for (int i = 0; i < instr_num_dsts(instr); i++) {
-        if (opnd_is_memory_reference(instr_get_dst(instr, i))) {
+        if (opnd_is_memory_reference(instr_get_dst(instr, i))) { //dst = write
             num++;
+            num_write++;
             op = 1;
             InstrumentMem(drcontext, bb, instr, instr_get_dst(instr, i));
         }
@@ -428,8 +452,8 @@ InstrumentInsCallback(void *drcontext, instr_instrument_msg_t *instrument_msg)
         DRCCTLIB_EXIT_PROCESS("drreg_unreserve_aflags != DRREG_SUCCESS");
     }
 #endif
-    dr_insert_clean_call(drcontext, bb, instr, (void *)InsertCleancall, false, 3,
-                         OPND_CREATE_CCT_INT(slot), OPND_CREATE_CCT_INT(num), OPND_CREATE_CCT_INT(op));
+    dr_insert_clean_call(drcontext, bb, instr, (void *)InsertCleancall, false, 5,
+                         OPND_CREATE_CCT_INT(slot), OPND_CREATE_CCT_INT(num), OPND_CREATE_CCT_INT(num_read), OPND_CREATE_CCT_INT(num_write), OPND_CREATE_CCT_INT(op));
 }
 
 static void
