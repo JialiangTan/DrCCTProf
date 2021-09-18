@@ -172,13 +172,16 @@ static uint8_t* GetOrCreateShadowBaseAddress(uint64_t addr){
 
 template<uint16_t AccessLen, uint32_t bufferOffset>
 struct RedSpyAnalysis{
-    /*
+    
     static bool IsWriteRedundant(void * &addr, void *drcontext){
         //int threadid = drcctlib_get_thread_id();
+        /*
         RedSpyThreadData* const tData = ClientGetTLS(drcontext);
         dr_fprintf(gTraceFile, "tData: %p\n", tData);
         dr_fprintf(gTraceFile, "Here");
-        AddrValPair *avPair = & tData->buffer[bufferOffset];
+        AddrValPair *avPair = & tData->buffer[bufferOffset];*/
+        per_thread_t *pt = (per_thread_t *)drmgr_get_tls_field(drcontext, tls_idx);
+        /*
         addr = avPair->address;
         switch(AccessLen){
             case 1: return *((uint8_t*)(&avPair->value)) == *(static_cast<uint8_t*>(avPair->address));
@@ -186,10 +189,10 @@ struct RedSpyAnalysis{
             case 4: return *((uint32_t*)(&avPair->value)) == *(static_cast<uint32_t*>(avPair->address));
             case 8: return *((uint64_t*)(&avPair->value)) == *(static_cast<uint64_t*>(avPair->address));
             default: return memcmp(&avPair->value, avPair->address, AccessLen) == 0;
-        }
-        //return true;
+        }*/
+        return true;
     }
-    */
+    
 
     static void RecordNByteValueBeforeWrite(void* addr, void* drcontext, uint32_t memOp){
         if(Sample_flag){
@@ -242,7 +245,7 @@ struct RedSpyAnalysis{
                 //uint64_t tmp = *(static_cast<uint64_t*>(addr));
                 //*((uint64_t *)(&(pt->value[memOp]))) = 10;
                 break;
-            default:
+            //default:
         }
 
         /*AddrValPair *avPair = & tData->buffer[bufferOffset];
@@ -303,6 +306,10 @@ struct RedSpyInstrument{
                 //RedSpyAnalysis<4, readBufferSlotIndex>::RecordNByteValueBeforeWrite(addr, drcontext, memOp);
                 break;
             case 8:
+                uint64_t temp;
+                if (!dr_safe_read(addr, 8, &temp, NULL))
+                    return;
+                dr_fprintf(gTraceFile, "temp is %lu\n", temp);
                 RedSpyAnalysis<8, readBufferSlotIndex>::RecordNByteValueBeforeWrite(addr, drcontext, memOp);
                 break;
             /*case 10:
@@ -395,6 +402,8 @@ BeforeWrite(void *drcontext, context_handle_t cur_ctxt_hndl, mem_ref_t *ref, int
 void
 AfterWrite(void *drcontext, context_handle_t cur_ctxt_hndl, mem_ref_t *ref, int32_t num, int32_t num_write){
     //dr_fprintf(gTraceFile, "Run afterwrite\n");
+    void *addr = ref->addr;
+    
 }
 
 
@@ -454,6 +463,7 @@ InstrumentMem(void *drcontext, instrlist_t *ilist, instr_t *where, opnd_t ref)
                 opnd_create_reg(free_reg)));
 
     // store mem_ref_t->size
+/*
 #ifdef ARM_CCTLIB
     MINSERT(ilist, where,
             XINST_CREATE_load_int(drcontext, opnd_create_reg(free_reg),
@@ -466,6 +476,14 @@ InstrumentMem(void *drcontext, instrlist_t *ilist, instr_t *where, opnd_t ref)
             XINST_CREATE_store(drcontext, OPND_CREATE_MEMPTR(reg_mem_ref_ptr, offsetof(mem_ref_t, size)),
                              OPND_CREATE_CCT_INT(drutil_opnd_mem_size_in_bytes(ref, where))));
 #endif
+*/
+    // store mem_ref_t->size
+    MINSERT(ilist, where,
+            XINST_CREATE_load_int(drcontext, opnd_create_reg(free_reg),
+                                  OPND_CREATE_CCT_INT(drutil_opnd_mem_size_in_bytes(ref, where))));
+    MINSERT(ilist, where,
+            XINST_CREATE_store(drcontext, OPND_CREATE_MEMPTR(reg_mem_ref_ptr, offsetof(mem_ref_t, size)),
+                             opnd_create_reg(free_reg)));
 
 #ifdef ARM_CCTLIB
     MINSERT(ilist, where,
