@@ -31,6 +31,7 @@ using namespace std;
                                           ##_ARGS)
 
 static int tls_idx;
+static int memOp_num; 
 
 // __thread bool Sample_flag = true;
 // __thread long long NUM_INS = 0;
@@ -208,23 +209,21 @@ struct RedSpyAnalysis{
                 return;
             }
         }
-        dr_fprintf(gTraceFile, "AccessLen = %d\n", AccessLen);
+        //dr_fprintf(gTraceFile, "AccessLen = %d\n", AccessLen);
         //RedSpyThreadData* const tData = ClientGetTLS(drcontext);
         per_thread_t *pt = (per_thread_t *)drmgr_get_tls_field(drcontext, tls_idx);
         pt->bytesWritten += AccessLen;
         //pt->value[memOp];
-        dr_fprintf(gTraceFile, "bytewritten = %p\n", pt->bytesWritten);
+        //dr_fprintf(gTraceFile, "bytewritten = %p\n", pt->bytesWritten);
         dr_fprintf(gTraceFile, "addr = %p\n", addr);
         
-        uint64_t tmp1 = *(static_cast<uint64_t*>(addr));
+        //uint64_t tmp1 = *(static_cast<uint64_t*>(addr));
+        //dr_fprintf(gTraceFile, "tmp1 = %d\n", tmp1);
         //uint64_t tmp2 = 10;
         //*((uint64_t *)(&(pt->value[memOp]))) = tmp2;
-        
-        //*((uint64_t *)(&(pt->value[memOp]))) = *(static_cast<uint64_t*>(addr));
-        
-        dr_fprintf(gTraceFile, "tmp1 = %lu\n", tmp1);
-        //*((uint64_t *)(&(pt->value[memOp]))) = *(static_cast<uint64_t*>(addr));
         //dr_fprintf(gTraceFile, "Before value of memOp = %lu\n", pt->value[memOp]);
+        //*((uint64_t *)(&(pt->value[memOp]))) = *(static_cast<uint64_t*>(addr));
+        
         switch(AccessLen) {
             case 1: 
                 break;
@@ -290,18 +289,21 @@ struct RedSpyInstrument{
         dr_fprintf(gTraceFile, "refSize = %d\n", refSize);
         switch(refSize) {
             case 1:
+                //RedSpyAnalysis<1, readBufferSlotIndex>::RecordNByteValueBeforeWrite(addr, drcontext, memOp);
                 break;
             case 2:
+                //RedSpyAnalysis<2, readBufferSlotIndex>::RecordNByteValueBeforeWrite(addr, drcontext, memOp);
                 break;
             case 4:
+                //RedSpyAnalysis<4, readBufferSlotIndex>::RecordNByteValueBeforeWrite(addr, drcontext, memOp);
                 break;
             case 8:
                 RedSpyAnalysis<8, readBufferSlotIndex>::RecordNByteValueBeforeWrite(addr, drcontext, memOp);
                 break;
-            case 10:
+            /*case 10:
                 break;
             case 16:
-                break;
+                break;*/
             default:
                 break;
         }
@@ -339,19 +341,9 @@ struct RedSpyInstrument{
 
 // client want to do
 void
-BeforWrite(void *drcontext, context_handle_t cur_ctxt_hndl, mem_ref_t *ref, int32_t num, int32_t num_write)
+BeforeWrite(void *drcontext, context_handle_t cur_ctxt_hndl, mem_ref_t *ref, int32_t num, int32_t num_write)
 {
     // add online analysis here
-    //void *addr = ref->addr;
-    //uint32_t refSize = ref->size;
-    //dr_fprintf(gTraceFile, "addr = %p\n", addr);
-    //dr_fprintf(gTraceFile, "whichOp = %d\n", whichOp);
-
-    /*if (num_write == 1){
-        RedSpyInstrument<0>::InstrumentReadValueBeforeAndAfterWriting(addr, drcontext, cur_ctxt_hndl, refSize, whichOp);
-        return;
-    }*/
-    
     //dr_fprintf(gTraceFile, "num_write = %d\n", num_write);
     int readBufferSlotIndex = 0;
     for(int32_t memOp = 0; memOp < num_write; memOp++){
@@ -414,8 +406,8 @@ InsertCleancall(int32_t slot, int32_t num, int32_t num_read, int32_t num_write, 
     per_thread_t *pt = (per_thread_t *)drmgr_get_tls_field(drcontext, tls_idx);
     context_handle_t cur_ctxt_hndl = drcctlib_get_context_handle(drcontext, slot);
 
-    /*
-    for (int i = 0; i < num; i++){
+    /* // change the order of for loop and if condition
+    for (int i = 0; i < memOp_num; i++){
         if(pt->opList[i] != 0) {
             AfterWrite(drcontext, cur_ctxt_hndl, &pt->cur_buf_list[i], num, num_write);
         }
@@ -428,9 +420,10 @@ InsertCleancall(int32_t slot, int32_t num, int32_t num_read, int32_t num_write, 
             void *opAddr = (&pt->cur_buf_list[i])->addr;
             pt->opList[i] = (uint64_t)opAddr;
             //dr_fprintf(gTraceFile, "opList[i] = %p\n", pt->opList[i]);
-            BeforWrite(drcontext, cur_ctxt_hndl, &pt->cur_buf_list[i], num, num_write);
+            BeforeWrite(drcontext, cur_ctxt_hndl, &pt->cur_buf_list[i], num, num_write);
         }
     }
+    memOp_num = num;
     BUF_PTR(pt->cur_buf, mem_ref_t, INSTRACE_TLS_OFFS_BUF_PTR) = pt->cur_buf_list;
 }
 
