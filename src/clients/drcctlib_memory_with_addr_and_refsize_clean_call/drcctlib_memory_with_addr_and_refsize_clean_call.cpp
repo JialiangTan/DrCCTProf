@@ -101,7 +101,6 @@ typedef struct _per_thread_t {
     uint64_t opList[MAX_WRITE_OPS_IN_INS];
     uint64_t value[MAX_WRITE_OPS_IN_INS];
     uint64_t bytesWritten;
-    //int opList[10];
 } per_thread_t;
 
 typedef struct AddrValPair {
@@ -217,30 +216,35 @@ struct RedSpyAnalysis{
         //dr_fprintf(gTraceFile, "bytewritten = %p\n", pt->bytesWritten);
         dr_fprintf(gTraceFile, "addr = %p\n", addr);
         
+        uint64_t tmp = *((uint64_t *)(&(pt->value[memOp])));
+        dr_fprintf(gTraceFile, "Before value of memOp = %lu\n", tmp);
         //uint64_t tmp1 = *(static_cast<uint64_t*>(addr));
-        //dr_fprintf(gTraceFile, "tmp1 = %d\n", tmp1);
+        //dr_fprintf(gTraceFile, "tmp1 = %lu\n", tmp1);
         //uint64_t tmp2 = 10;
         //*((uint64_t *)(&(pt->value[memOp]))) = tmp2;
-        //dr_fprintf(gTraceFile, "Before value of memOp = %lu\n", pt->value[memOp]);
+        tmp = *((uint64_t*)(addr));
+        dr_fprintf(gTraceFile, "After value of memOp = %lu\n", tmp);
         //*((uint64_t *)(&(pt->value[memOp]))) = *(static_cast<uint64_t*>(addr));
         
         switch(AccessLen) {
             case 1: 
+                //*((uint8_t*)(pt->value[memOp])) = *(static_cast<uint8_t*>(addr));
+                break;
+            case 2:
+                //*((uint16_t*)(pt->value[memOp])) = *(static_cast<uint16_t*>(addr));
+                break;
+            case 4:
+                //*((uint32_t*)(pt->value[memOp])) = *(static_cast<uint32_t*>(addr));
                 break;
             case 8: 
                 dr_fprintf(gTraceFile, "case 8\n");
                 //*((uint64_t*)(pt->value[memOp])) = *(static_cast<uint64_t*>(addr));
                 //uint64_t tmp = *(static_cast<uint64_t*>(addr));
                 //*((uint64_t *)(&(pt->value[memOp]))) = 10;
-                
-                //dr_fprintf(gTraceFile, "After value of memOp = %lu\n", pt->value[memOp]);
                 break;
             default:
-                break;
         }
-        //tData->bytesWritten += AccessLen;
-        
-        //dr_fprintf(gTraceFile, "tData: %p\n", tData->bytesWritten);
+
         /*AddrValPair *avPair = & tData->buffer[bufferOffset];
         avPair->address = addr;
         switch(AccessLen){
@@ -252,11 +256,12 @@ struct RedSpyAnalysis{
         }*/
     }
 
-    /*
+    
     static void CheckNByteValueAfterWrite(void* drcontext, context_handle_t cur_ctxt_hndl){
         if(!Sample_flag){
             return;
         }
+        /*
         void *addr;
         bool isRedundantWrite = IsWriteRedundant(addr, drcontext);
         uint8_t *status = GetOrCreateShadowBaseAddress((uint64_t)addr);
@@ -275,9 +280,9 @@ struct RedSpyAnalysis{
                     //AddToRedTable();
                 }
             }
-        }
+        }*/
 
-    }*/
+    }
 };
 
 template<uint32_t readBufferSlotIndex>
@@ -392,11 +397,6 @@ AfterWrite(void *drcontext, context_handle_t cur_ctxt_hndl, mem_ref_t *ref, int3
     //dr_fprintf(gTraceFile, "Run afterwrite\n");
 }
 
-/*
-void GetClientContext(void *drcontext){
-    per_thread_t *pt = (per_thread_t *)drmgr_get_tls_field(drcontext, tls_idx);
-    return pt;
-}*/
 
 // dr clean call
 void
