@@ -200,7 +200,7 @@ struct RedSpyAnalysis{
     }
     
 
-    static void RecordNByteValueBeforeWrite(void* addr, void* drcontext, uint32_t memOp){
+    static void RecordNByteValueBeforeWrite(void *addr, void* drcontext, uint32_t memOp){
         if(Sample_flag){
             NUM_INS++;
             if(NUM_INS > WINDOW_ENABLE){
@@ -218,40 +218,53 @@ struct RedSpyAnalysis{
             }
         }
         //dr_fprintf(gTraceFile, "AccessLen = %d\n", AccessLen);
-        //RedSpyThreadData* const tData = ClientGetTLS(drcontext);
         per_thread_t *pt = (per_thread_t *)drmgr_get_tls_field(drcontext, tls_idx);
         pt->bytesWritten += AccessLen;
         //pt->value[memOp];
         //dr_fprintf(gTraceFile, "bytewritten = %p\n", pt->bytesWritten);
         dr_fprintf(gTraceFile, "addr = %p\n", addr);
-        
-        uint64_t tmp = *((uint64_t *)(&(pt->value[memOp])));
-        dr_fprintf(gTraceFile, "Before value of memOp = %lu\n", tmp);
-        //uint64_t tmp1 = *(static_cast<uint64_t*>(addr));
-        //dr_fprintf(gTraceFile, "tmp1 = %lu\n", tmp1);
-        //uint64_t tmp2 = 10;
-        //*((uint64_t *)(&(pt->value[memOp]))) = tmp2;
-        tmp = *((uint64_t*)(addr));
-        dr_fprintf(gTraceFile, "After value of memOp = %lu\n", tmp);
         //*((uint64_t *)(&(pt->value[memOp]))) = *(static_cast<uint64_t*>(addr));
         
         switch(AccessLen) {
             case 1: 
-                //*((uint8_t*)(pt->value[memOp])) = *(static_cast<uint8_t*>(addr));
+                uint8_t temp1;
+                if (!dr_safe_read(addr, 1, &temp1, NULL))
+                    return;
+                dr_fprintf(gTraceFile, "before value = %" PRIu8 "\n", *((uint8_t *)(&(pt->value[memOp]))));
+                *((uint8_t *)(&(pt->value[memOp]))) = temp1;
+                dr_fprintf(gTraceFile, "after value = %" PRIu8 "\n", *((uint8_t *)(&(pt->value[memOp]))));
                 break;
             case 2:
                 //*((uint16_t*)(pt->value[memOp])) = *(static_cast<uint16_t*>(addr));
+                uint16_t temp2;
+                if (!dr_safe_read(addr, 2, &temp2, NULL))
+                    return;
+                dr_fprintf(gTraceFile, "before value = %u\n", *((uint16_t *)(&(pt->value[memOp]))));
+                *((uint16_t *)(&(pt->value[memOp]))) = temp2;
+                dr_fprintf(gTraceFile, "after value = %u\n", *((uint16_t *)(&(pt->value[memOp]))));
                 break;
             case 4:
+                uint32_t temp4;
+                if (!dr_safe_read(addr, 4, &temp4, NULL))
+                    return;
+                dr_fprintf(gTraceFile, "before value = %lu\n", *((uint32_t *)(&(pt->value[memOp]))));
+                *((uint32_t *)(&(pt->value[memOp]))) = temp4;
+                dr_fprintf(gTraceFile, "after value = %lu\n", *((uint32_t *)(&(pt->value[memOp]))));
                 //*((uint32_t*)(pt->value[memOp])) = *(static_cast<uint32_t*>(addr));
                 break;
             case 8: 
-                dr_fprintf(gTraceFile, "case 8\n");
+                uint64_t temp8;
+                if (!dr_safe_read(addr, 8, &temp8, NULL))
+                    return;
+                //dr_fprintf(gTraceFile, "temp8 is %lu\n", temp8);
+                dr_fprintf(gTraceFile, "before value = %llu\n", *((uint64_t *)(&(pt->value[memOp]))));
+                *((uint64_t *)(&(pt->value[memOp]))) = temp8;
+                dr_fprintf(gTraceFile, "after value = %llu\n", *((uint64_t *)(&(pt->value[memOp]))));
                 //*((uint64_t*)(pt->value[memOp])) = *(static_cast<uint64_t*>(addr));
-                //uint64_t tmp = *(static_cast<uint64_t*>(addr));
-                //*((uint64_t *)(&(pt->value[memOp]))) = 10;
                 break;
             //default:
+                //TODO 
+                //break;
         }
 
         /*AddrValPair *avPair = & tData->buffer[bufferOffset];
@@ -303,26 +316,34 @@ struct RedSpyInstrument{
         dr_fprintf(gTraceFile, "refSize = %d\n", refSize);
         switch(refSize) {
             case 1:
-                //RedSpyAnalysis<1, readBufferSlotIndex>::RecordNByteValueBeforeWrite(addr, drcontext, memOp);
+                RedSpyAnalysis<1, readBufferSlotIndex>::RecordNByteValueBeforeWrite(addr, drcontext, memOp);
                 break;
             case 2:
-                //RedSpyAnalysis<2, readBufferSlotIndex>::RecordNByteValueBeforeWrite(addr, drcontext, memOp);
+                RedSpyAnalysis<2, readBufferSlotIndex>::RecordNByteValueBeforeWrite(addr, drcontext, memOp);
                 break;
             case 4:
-                //RedSpyAnalysis<4, readBufferSlotIndex>::RecordNByteValueBeforeWrite(addr, drcontext, memOp);
+                RedSpyAnalysis<4, readBufferSlotIndex>::RecordNByteValueBeforeWrite(addr, drcontext, memOp);
                 break;
             case 8:
-                uint64_t temp;
+                /*uint64_t temp;
                 if (!dr_safe_read(addr, 8, &temp, NULL))
                     return;
-                dr_fprintf(gTraceFile, "temp is %lu\n", temp);
+                dr_fprintf(gTraceFile, "temp is %lu\n", temp);*/
                 RedSpyAnalysis<8, readBufferSlotIndex>::RecordNByteValueBeforeWrite(addr, drcontext, memOp);
                 break;
-            /*case 10:
+            case 10:
+                RedSpyAnalysis<10, readBufferSlotIndex>::RecordNByteValueBeforeWrite(addr, drcontext, memOp);
                 break;
             case 16:
-                break;*/
+                /*uint64_t temp;
+                if (!dr_safe_read(addr, 8, &temp, NULL))
+                    return;
+                dr_fprintf(gTraceFile, "temp is %lu\n", temp);*/
+                RedSpyAnalysis<16, readBufferSlotIndex>::RecordNByteValueBeforeWrite(addr, drcontext, memOp);
+                break;
             default:
+                // TODO
+                // RecordValueBeforeLargeWrite();
                 break;
         }
 
@@ -365,7 +386,7 @@ void
 BeforeWrite(void *drcontext, context_handle_t cur_ctxt_hndl, mem_ref_t *ref, int32_t num, int32_t num_write)
 {
     // add online analysis here
-    dr_fprintf(gTraceFile, "Before function: num_write = %d\n", num_write);
+    //dr_fprintf(gTraceFile, "Before function: num_write = %d\n", num_write);
     int readBufferSlotIndex = 0;
     for(int32_t memOp = 0; memOp < num_write; memOp++){
         //dr_fprintf(gTraceFile, "readBufferSlotIndex = %d\n", readBufferSlotIndex);
