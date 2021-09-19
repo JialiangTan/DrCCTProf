@@ -178,16 +178,13 @@ static uint8_t* GetOrCreateShadowBaseAddress(uint64_t addr){
 
 template<uint16_t AccessLen, uint32_t bufferOffset>
 struct RedSpyAnalysis{
-    
-    static bool IsWriteRedundant(void * &addr, void *drcontext){
+    /*static bool IsWriteRedundant(void * &addr, void *drcontext){
         //int threadid = drcctlib_get_thread_id();
-        /*
+        
         RedSpyThreadData* const tData = ClientGetTLS(drcontext);
         dr_fprintf(gTraceFile, "tData: %p\n", tData);
         dr_fprintf(gTraceFile, "Here");
-        AddrValPair *avPair = & tData->buffer[bufferOffset];*/
-        per_thread_t *pt = (per_thread_t *)drmgr_get_tls_field(drcontext, tls_idx);
-        /*
+        AddrValPair *avPair = & tData->buffer[bufferOffset];
         addr = avPair->address;
         switch(AccessLen){
             case 1: return *((uint8_t*)(&avPair->value)) == *(static_cast<uint8_t*>(avPair->address));
@@ -195,10 +192,9 @@ struct RedSpyAnalysis{
             case 4: return *((uint32_t*)(&avPair->value)) == *(static_cast<uint32_t*>(avPair->address));
             case 8: return *((uint64_t*)(&avPair->value)) == *(static_cast<uint64_t*>(avPair->address));
             default: return memcmp(&avPair->value, avPair->address, AccessLen) == 0;
-        }*/
+        }
         return true;
-    }
-    
+    }*/
 
     static void RecordNByteValueBeforeWrite(void *addr, void* drcontext, uint32_t memOp){
         if(Sample_flag){
@@ -267,16 +263,6 @@ struct RedSpyAnalysis{
                 //TODO 
                 //break;
         }
-
-        /*AddrValPair *avPair = & tData->buffer[bufferOffset];
-        avPair->address = addr;
-        switch(AccessLen){
-            case 1: *((uint8_t*)(&avPair->value)) = *(static_cast<uint8_t*>(addr)); break;
-            case 2: *((uint16_t*)(&avPair->value)) = *(static_cast<uint16_t*>(addr)); break;
-            case 4: *((uint32_t*)(&avPair->value)) = *(static_cast<uint32_t*>(addr)); break;
-            case 8: *((uint64_t*)(&avPair->value)) = *(static_cast<uint64_t*>(addr)); break;
-            default: memcmp(&avPair->value, addr, AccessLen);
-        }*/
     }
 
     
