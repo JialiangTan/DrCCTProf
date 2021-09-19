@@ -95,10 +95,16 @@ typedef struct _mem_ref_t {
     size_t size;
 } mem_ref_t;
 
+typedef struct op_ref{
+    uint64_t *opAddr;
+    uint32_t opSize;
+}op_ref;
+
 typedef struct _per_thread_t {
     mem_ref_t *cur_buf_list;
     void *cur_buf;
-    uint64_t opList[MAX_WRITE_OPS_IN_INS];
+    op_ref opList[MAX_WRITE_OPS_IN_INS];
+    //uint64_t opList[MAX_WRITE_OPS_IN_INS];
     uint64_t value[MAX_WRITE_OPS_IN_INS];
     uint64_t bytesWritten;
 } per_thread_t;
@@ -321,8 +327,11 @@ struct RedSpyInstrument{
         }
 
     }
-    static void InstrumentValueAfterWriting(){
-
+    static void InstrumentValueAfterWriting(void *drcontext, context_handle_t cur_ctxt_hndl, op_ref *opList, uint32_t memOp){
+        void *opAddr = opList->opAddr;
+        uint32_t opSize = opList->opSize;
+        //dr_fprintf(gTraceFile, "3: opAddr = %p\n", opAddr);
+        //dr_fprintf(gTraceFile, "3: opSize = %lu\n", opSize);
     }
 
     static void InstrumentReadValueBeforeAndAfterWriting(void *addr, void *drcontext, context_handle_t cur_ctxt_hndl, uint32_t refSize, uint32_t whichOp){
@@ -356,16 +365,14 @@ void
 BeforeWrite(void *drcontext, context_handle_t cur_ctxt_hndl, mem_ref_t *ref, int32_t num, int32_t num_write)
 {
     // add online analysis here
-    //dr_fprintf(gTraceFile, "num_write = %d\n", num_write);
+    dr_fprintf(gTraceFile, "Before function: num_write = %d\n", num_write);
     int readBufferSlotIndex = 0;
     for(int32_t memOp = 0; memOp < num_write; memOp++){
-        dr_fprintf(gTraceFile, "readBufferSlotIndex = %d\n", readBufferSlotIndex);
-        //if(op == 0)//read is 0, write is 1
-            //continue;
-        dr_fprintf(gTraceFile, "memOp = %d\n", memOp);
+        //dr_fprintf(gTraceFile, "readBufferSlotIndex = %d\n", readBufferSlotIndex);
+        //dr_fprintf(gTraceFile, "memOp = %d\n", memOp);
         switch(readBufferSlotIndex){
             case 0:
-                // Read the value at location before and after this instruction
+                // Read the value at location before this instruction
                 RedSpyInstrument<0>::InstrumentValueBeforeWriting(drcontext, cur_ctxt_hndl, ref, memOp);
                 //RedSpyInstrument<0>::InstrumentReadValueBeforeAndAfterWriting(addr, drcontext, cur_ctxt_hndl, refSize, memOp);
                 //dr_fprintf(gTraceFile, "Case 0\n");
@@ -400,10 +407,38 @@ BeforeWrite(void *drcontext, context_handle_t cur_ctxt_hndl, mem_ref_t *ref, int
 }
 
 void
-AfterWrite(void *drcontext, context_handle_t cur_ctxt_hndl, mem_ref_t *ref, int32_t num, int32_t num_write){
+AfterWrite(void *drcontext, context_handle_t cur_ctxt_hndl, op_ref *opList, int32_t num, int32_t num_write){
     //dr_fprintf(gTraceFile, "Run afterwrite\n");
-    void *addr = ref->addr;
-    
+    //void *opAddr = opList->opAddr;
+    //uint32_t opSize = opList->opSize;
+    //dr_fprintf(gTraceFile, "3: opAddr = %p\n", addr);
+    //dr_fprintf(gTraceFile, "3: opSize = %lu\n", opSize);
+    //dr_fprintf(gTraceFile, "Before function: num_write = %d\n", num_write);
+    int readBufferSlotIndex = 0;
+    for(int32_t memOp = 0; memOp < num_write; memOp++){
+        // read the value at this location after write
+        switch(readBufferSlotIndex){
+            case 0:
+                RedSpyInstrument<0>::InstrumentValueAfterWriting(drcontext, cur_ctxt_hndl, opList, memOp);
+                break;
+            case 1:
+                RedSpyInstrument<1>::InstrumentValueAfterWriting(drcontext, cur_ctxt_hndl, opList, memOp);
+                break;
+            case 2:
+                RedSpyInstrument<2>::InstrumentValueAfterWriting(drcontext, cur_ctxt_hndl, opList, memOp);
+                break;
+            case 3:
+                RedSpyInstrument<3>::InstrumentValueAfterWriting(drcontext, cur_ctxt_hndl, opList, memOp);
+                break;
+            case 4:
+                RedSpyInstrument<4>::InstrumentValueAfterWriting(drcontext, cur_ctxt_hndl, opList, memOp);
+                break;
+            default:
+                break;
+        }
+        // use next slot for the next write op
+        readBufferSlotIndex++;
+    }
 }
 
 
@@ -415,21 +450,30 @@ InsertCleancall(int32_t slot, int32_t num, int32_t num_read, int32_t num_write, 
     per_thread_t *pt = (per_thread_t *)drmgr_get_tls_field(drcontext, tls_idx);
     context_handle_t cur_ctxt_hndl = drcctlib_get_context_handle(drcontext, slot);
 
-    /* // change the order of for loop and if condition
+    // change the order of for loop and if condition
     for (int i = 0; i < memOp_num; i++){
-        if(pt->opList[i] != 0) {
-            AfterWrite(drcontext, cur_ctxt_hndl, &pt->cur_buf_list[i], num, num_write);
+        if(pt->opList[i].opAddr != 0) {
+            AfterWrite(drcontext, cur_ctxt_hndl, &pt->opList[i], num, num_write);
         }
-    }*/
+    }
 
     for (int i = 0; i < num; i++) {
         //uint64_t op = pt->opList[i];
         //dr_fprintf(gTraceFile, "opList[i] = %p\n", op);
         if (pt->cur_buf_list[i].addr != 0) {
-            void *opAddr = (&pt->cur_buf_list[i])->addr;
-            pt->opList[i] = (uint64_t)opAddr;
+            //void *opAddr = (&pt->cur_buf_list[i])->addr;
+            // store addr and size of write ops in opList
+            pt->opList[i].opAddr = (uint64_t*)((&pt->cur_buf_list[i])->addr);
+            pt->opList[i].opSize = (uint32_t)((&pt->cur_buf_list[i])->size);
             //dr_fprintf(gTraceFile, "opList[i] = %p\n", pt->opList[i]);
+            //dr_fprintf(gTraceFile, "1: addr = %p\n", (&pt->cur_buf_list[i])->addr);
+            //dr_fprintf(gTraceFile, "2. opList[i].opAddr = %p\n", pt->opList[i].opAddr);
+            //dr_fprintf(gTraceFile, "1: opSize = %lu\n", (&pt->cur_buf_list[i])->size);
+            //dr_fprintf(gTraceFile, "2. opSize = %lu\n", pt->opList[i].opSize);
             BeforeWrite(drcontext, cur_ctxt_hndl, &pt->cur_buf_list[i], num, num_write);
+        } else {
+            pt->opList[i].opAddr = 0;
+            pt->opList[i].opSize = 0;
         }
     }
     memOp_num = num;
