@@ -15,6 +15,7 @@
 #include <sys/mman.h>
 #include <functional>
 #include <vector>
+#include <algorithm>
 
 #include "dr_api.h"
 #include "drmgr.h"
@@ -72,6 +73,11 @@ thread_local long long NUM_INS = 0;
 
 #define MAKE_CONTEXT_PAIR(a, b) (((uint64_t)(a) << 32) | ((uint64_t)(b)))
 
+#define DECODE_DEAD(data) static_cast<context_handle_t>(((data) & 0xffffffffffffffff) >> 32)
+#define DECODE_KILL(data) (static_cast<context_handle_t>( (data) & 0x00000000ffffffff))
+
+#define MAX_CONTEXTS (50)
+
 static file_t gTraceFile;
 static uint8_t** gL1PageTable[LEVEL_1_PAGE_TABLE_SIZE];
 
@@ -120,6 +126,13 @@ typedef struct RedSpyThreadData {
     uint64_t bytesWritten;
 } RedSpyThreadData;
 
+typedef struct RedanduncyData{
+    context_handle_t dead;
+    context_handle_t kill;
+    uint64_t frequency;
+} RedanduncyData;
+
+void *lock;
 static unordered_map<uint64_t, uint64_t> RedMap[THREAD_MAX];
 //static unordered_map<int, unordered_map<uint64_t, uint64_t>> RedMap;
 
@@ -132,7 +145,7 @@ static void AddToRedTable(uint64_t key, uint16_t value, int threadID){
         RedMap[threadID][key] = value;
     } else {
         it->second += value;
-        dr_fprintf(gTraceFile, "RedTable->first = %llu, RedTable->second = %llu\n", it->first, it->second);
+        //dr_fprintf(gTraceFile, "RedTable->first = %llu, RedTable->second = %llu\n", it->first, it->second);
     }
 #ifdef MULTI_THREADED
     //UNLOCK_RED_MAP();
@@ -250,11 +263,11 @@ struct RedSpyAnalysis{
                 uint64_t temp8;
                 if (!dr_safe_read(addr, 8, &temp8, NULL))
                     return;
-                //dr_fprintf(gTraceFile, "!!!!!!!!temp8 is %lu\n", temp8);
                 //dr_fprintf(gTraceFile, "1. before value = %llu\n", *((uint64_t *)(&(pt->value[memOp]))));
                 *((uint64_t *)(&(pt->value[memOp]))) = temp8;
                 //dr_fprintf(gTraceFile, "2. after value = %llu\n", *((uint64_t *)(&(pt->value[memOp]))));
-                dr_fprintf(gTraceFile, "(1) addr value = %llu\n", *((uint64_t *)(&(pt->value[memOp]))));
+                // print 1st here:
+                //dr_fprintf(gTraceFile, "(1) addr value = %llu\n", *((uint64_t *)(&(pt->value[memOp]))));
                 //*((uint64_t*)(pt->value[memOp])) = *(static_cast<uint64_t*>(addr));
                 break;
             //default:
@@ -316,7 +329,8 @@ struct RedSpyAnalysis{
                 uint64_t temp8;
                 if (!dr_safe_read(opAddr, 8, &temp8, NULL))
                     return;
-                dr_fprintf(gTraceFile, "(2) new temp8 is %lu\n", temp8);
+                // print the 2nd addr here:
+                //dr_fprintf(gTraceFile, "(2) new temp8 is %lu\n", temp8);
                 // compare the before and after value in opAddr
                 if (*((uint64_t *)(&(pt->value[memOp]))) == temp8){
                     //dr_fprintf(gTraceFile, "in case 8, equal\n");
@@ -331,14 +345,14 @@ struct RedSpyAnalysis{
                 //break;
         }
         //dr_fprintf(gTraceFile, "zero = %d\n", zero);
-        dr_fprintf(gTraceFile, "bool = %d\n", isRedundantWrite);
+        //dr_fprintf(gTraceFile, "bool = %d\n", isRedundantWrite);
 
         uint8_t *status = GetOrCreateShadowBaseAddress((uint64_t)opAddr);
         //dr_fprintf(gTraceFile, "size of = ")
         // context_handle_t: int32_t
         int threadID = drcctlib_get_thread_id();
         //thread_id_t threadID = dr_get_thread_id(drcontext);
-        dr_fprintf(gTraceFile, "thread id = %d\n", threadID);
+        //dr_fprintf(gTraceFile, "thread id = %d\n", threadID);
         context_handle_t *prevIP = (context_handle_t*)(status + PAGE_OFFSET((uint64_t)opAddr) * sizeof(context_handle_t));
         bool isAccessWithinPageBoundary = IS_ACCESS_WITHIN_PAGE_BOUNDARY((uint64_t)opAddr, AccessLen);
         if (isRedundantWrite) {
@@ -546,7 +560,7 @@ AfterWrite(void *drcontext, context_handle_t cur_ctxt_hndl, op_ref *opList, int3
     //dr_fprintf(gTraceFile, "3: opSize = %lu\n", opSize);
     //dr_fprintf(gTraceFile, "Before function: num_write = %d\n", num_write);
     int readBufferSlotIndex = 0;
-    dr_fprintf(gTraceFile, "num_write = %d\n", num_write);
+    //f(gTraceFile, "num_write = %d\n", num_write);
     for(int32_t memOp = 0; memOp < num_write; memOp++){
         // read the value at this location after write
         switch(readBufferSlotIndex){
@@ -587,6 +601,7 @@ InsertCleancall(int32_t slot, int32_t num, int32_t num_read, int32_t num_write, 
     per_thread_t *pt = (per_thread_t *)drmgr_get_tls_field(drcontext, tls_idx);
     context_handle_t cur_ctxt_hndl = drcctlib_get_context_handle(drcontext, slot);
 
+    //dr_fprintf(gTraceFile, "!!!num = %d, memOp_num = %d, num_write = %d\n", num, memOp_num, num_write);
     // change the order of for loop and if condition
     for (int i = 0; i < memOp_num; i++){
         if(pt->opList[i].opAddr != 0) {
@@ -747,10 +762,93 @@ InstrumentInsCallback(void *drcontext, instr_instrument_msg_t *instrument_msg)
                          OPND_CREATE_CCT_INT(slot), OPND_CREATE_CCT_INT(num), OPND_CREATE_CCT_INT(num_read), OPND_CREATE_CCT_INT(num_write), OPND_CREATE_CCT_INT(op));
 }
 
+
+static bool RedundancyCompare(const struct RedanduncyData &first, const struct RedanduncyData &second) {
+    return first.frequency > second.frequency ? true : false;
+}
+
+bool IsSameSourceLine(context_handle_t ctx1, context_handle_t ctx2) {
+    // Given two contexts handles, returns true 
+    //if they both map to the same source line (could be different instructions)
+    return true;
+}
+
+void PrintRedundancyPairs(void * drcontext,int threadID) {
+    //dr_fprintf(gTraceFile, "PrintRedundancyPair here\n");
+    vector<RedanduncyData> tmpList;
+    vector<RedanduncyData>::iterator tmpIt;
+    uint64_t grandTotalRedundantBytes = 0;
+    dr_fprintf(gTraceFile, "********** Dump Data from Thread %d **********\n", threadID);
+    for (unordered_map<uint64_t, uint64_t>::iterator it = RedMap[threadID].begin(); it != RedMap[threadID].end(); it++) {
+        // 
+        dr_fprintf(gTraceFile, "it.first = %llu\n", (*it).first);
+        context_handle_t dead = DECODE_DEAD((*it).first);
+        context_handle_t kill = DECODE_KILL((*it).first);
+        dr_fprintf(gTraceFile, "dead data: %lu, and kill data: %lu\n", dead, kill);
+
+        for (tmpIt = tmpList.begin(); tmpIt != tmpList.end(); tmpIt++) {
+            //f(gTraceFile, "run inner for\n");
+            bool ct1 = false;
+            if (dead == 0 || ((*tmpIt).dead) == 0) {
+                if (dead == 0 && ((*tmpIt).dead) == 0) 
+                    ct1 = true;
+            } else {
+                ct1 = drcctlib_have_same_source_line(dead, (*tmpIt).dead);
+            }
+            //dr_fprintf(gTraceFile, "ct1 = %d\n", ct1);
+            bool ct2 = drcctlib_have_same_source_line(kill, (*tmpIt).kill);
+            //dr_fprintf(gTraceFile, "ct1 = %d, ct2 = %d\n", ct1, ct2);
+            if (ct1 && ct2) {
+                (*tmpIt).frequency += (*it).second;
+                grandTotalRedundantBytes += (*it).second;
+                break;
+            }
+        }
+        if (tmpIt == tmpList.end()) {
+            RedanduncyData tmp = { dead, kill, (*it).second};
+            tmpList.push_back(tmp);
+            grandTotalRedundantBytes += tmp.frequency;
+        }
+    }
+    per_thread_t *pt = (per_thread_t *)drmgr_get_tls_field(drcontext, tls_idx);
+    //uint64_t tmp = pt->bytesWritten;
+    dr_fprintf(gTraceFile, "\nTotal redundant bytes = %f %%\n", grandTotalRedundantBytes * 100.0 / (pt->bytesWritten));
+
+    sort(tmpList.begin(), tmpList.end(), RedundancyCompare);
+    //vector<struct AnalyzedMetric_t>::iterator listIt;
+    vector<RedanduncyData>::iterator listIt;
+    int cntxNum = 0;
+    //int i = 0;
+    for (listIt = tmpList.begin(); listIt != tmpList.end(); listIt++) {
+        //i++;
+        if (cntxNum < MAX_CONTEXTS) {
+            dr_fprintf(gTraceFile, "\n========== (%f) %% ==========\n", (*listIt).frequency * 100.0 / grandTotalRedundantBytes);
+            if ((*listIt).dead == 0) {
+                dr_fprintf(gTraceFile, "\nPrepopulated with by OS\n");
+            } else {
+                //drcctlib_print_full_cct(gTraceFile, (*listIt).dead, true, false, -1);
+                drcctlib_print_backtrace(gTraceFile, (*listIt).dead, false, true, -1);
+                dr_fprintf(gTraceFile, "dead context: %lu\n", (*listIt).dead);
+            }
+            dr_fprintf(gTraceFile, "--------------------Redundantly written by--------------------\n");
+            drcctlib_print_backtrace(gTraceFile, (*listIt).kill, false, true, -1);
+            dr_fprintf(gTraceFile, "kill context: %lu\n", (*listIt).kill);
+        }
+        else {
+            break;
+        }
+        cntxNum++;
+    }
+    //dr_fprintf(gTraceFile, "i: %d\n", i);
+}
+
+
+
+/*
 static void
 InitThreadData(RedSpyThreadData *tdata){
     tdata->bytesWritten = 0;
-}
+}*/
 
 static void
 ClientThreadStart(void *drcontext)
@@ -776,6 +874,19 @@ ClientThreadEnd(void *drcontext)
     dr_global_free(pt->cur_buf_list, TLS_MEM_REF_BUFF_SIZE * sizeof(mem_ref_t));
     //dr_global_free(pt->opList, TLS_MEM_REF_BUFF_SIZE * sizeof(uint64_t));
     dr_thread_free(drcontext, pt, sizeof(per_thread_t));
+
+    // TODO
+    // ask Qidong if it's ok to dump data here
+    // and if it's ok to get threadID here
+    int threadID = drcctlib_get_thread_id();
+    //thread_id_t threadID = dr_get_thread_id(drcontext);
+    //dr_fprintf(gTraceFile, "ClientThreadEnd thread id = %d\n", threadID);
+    
+    // need lock for drcctlib_have_same_source_line
+    dr_mutex_lock(lock);
+    PrintRedundancyPairs(drcontext, threadID);
+    dr_mutex_unlock(lock);
+    RedMap[threadID].clear();
 }
 
 static void
@@ -786,6 +897,7 @@ ClientInit(int argc, const char *argv[])
     gTraceFile = dr_open_file(name, DR_FILE_WRITE_OVERWRITE | DR_FILE_ALLOW_LARGE);
     DR_ASSERT(gTraceFile != INVALID_FILE);
     dr_fprintf(gTraceFile, "ClientInit\n");
+    lock = dr_mutex_create();
     
 }
 
@@ -794,6 +906,9 @@ ClientExit(void)
 {
     // add output module here
     dr_fprintf(gTraceFile, "ClientExit\n");
+    //int threadID = drcctlib_get_thread_id();
+    //thread_id_t threadID = dr_get_thread_id(drcontext);
+    //dr_fprintf(gTraceFile, "thread id in ClientExit = %d\n", threadID);
 
     drcctlib_exit();
 
@@ -812,6 +927,7 @@ ClientExit(void)
         DRCCTLIB_PRINTF("failed to exit drreg");
     }
     drutil_exit();
+    dr_mutex_destroy(lock);
 }
 
 #ifdef __cplusplus
@@ -851,6 +967,7 @@ dr_client_main(client_id_t id, int argc, const char *argv[])
             "ERROR: drcctlib_memory_with_addr_and_refsize_clean_call dr_raw_tls_calloc fail");
     }
     drcctlib_init(DRCCTLIB_FILTER_MEM_ACCESS_INSTR, INVALID_FILE, InstrumentInsCallback, false);
+    // add print function
     dr_register_exit_event(ClientExit);
 }
 
