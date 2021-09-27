@@ -21,6 +21,7 @@
 //#include "shadow_memory.h"
 //#include "shadow_memory_ml.h"
 
+
 using namespace std;
 
 #define OUTPUT_SIZE 20
@@ -200,61 +201,6 @@ REPORT_DEAD(curCtxt, lastCtxt, hashVar, 1);\
 }}while(0)
 
 
-/*
-// make 64bit hash from 2 32bit deltas from
-// remove lower 3 bits so that when we need more than 4 GB HASH still continues to work
-# if 0
-ContextHash128To64(context_handle_t cur_ctxt_hndl, uint32_t oldCtxt, uint64_t hashVar) {
-    uint64_t key = (uint64_t) (((void**)oldCtxt) - gPreAllocatedContextBuffer);
-    hashVar = key << 32;
-    key = (uint64_t) (((void**)curCtxt) - gPreAllocatedContextBuffer);
-    hashVar |= key;
-}
-
-# else
-ContextHash128To64(context_handle_t cur_ctxt_hndl, uint32_t oldCtxt, uint64_t hashVar) {
-    uint64_t key = (uint64_t) (oldCtxt);
-    hashVar = key << 32;
-    key = (uint64_t) (cur_ctxt_hndl); //curCtxt
-    hashVar |= key;
-}
-#endif 
-
-# if defined(CONTINUOUS_DEADINFO)
-#define DECLARE_HASHVAR(name) uint64_t name
-void
-ReportDead(context_handle_t cur_ctxt_hndl, uint32_t lastCtxt, uint64_t size){
-    DECLARE_HASHVAR(hashVar);
-    do {
-        CONTEXT_HASH_128BITS_TO_64BITS(cur_ctxt_hndl, lastCtxt, hashVar);
-	// do something
-        if ((gDeadMapIt = DeadMap.find(hashVar)) == DeadMap.end()) {
-            DeadMap.insert(std::pair<uint64_t, uint64_t>(hashVar,size));
-        }
-        else {
-            (gDeadMapIt->second) += size;
-        }   
-    } while(0); 
-}
-
-# else // no defined(CONTINUOUS_DEADINFO)
-#define DECLARE_HASHVAR(name) uint64_t name
-void
-ReportDead(context_handle_t cur_ctxt_hndl, uint32_t lastCtxt, uint64_t hashVar, uint64_t size){
-    do {
-        CONTEXT_HASH_128BITS_TO_64BITS(curCtxt, lastCtxt,hashVar);
-        if ( (gDeadMapIt = DeadMap.find(hashVar))  == DeadMap.end()) {
-	    DeadInfo deadInfo = { lastCtxt,  curCtxt, size };
-	    DeadMap.insert(std::pair<uint64_t, DeadInfo>(hashVar,deadInfo));
-	}
-	else {
-	    (gDeadMapIt->second.count) += size;
-	}
-    } while(0);
-}
-# endif
-*/
-
 uint8_t** gL1PageTable[LEVEL_1_PAGE_TABLE_SIZE];
 uint64_t gTotalDead = 0;
 uint32_t gClientNumThreads = 1;
@@ -308,7 +254,6 @@ void
 Record1ByteMemWrite(void *addr, context_handle_t cur_ctxt_hndl){
     //context_handle_t: int32_t
     uint8_t *status = GetOrCreateShadowBaseAddress(addr);
-    //dr_fprintf(gTraceFile, "Run here\n");
     uint32_t *lastIP = (uint32_t *)(status + PAGE_SIZE + PAGE_OFFSET((uint64_t)addr) * sizeof(uint32_t));    
     //dr_fprintf(gTraceFile, "GetOrCreateShadowBaseAddress: 1Byte write status: %p\n", status);
 
@@ -328,20 +273,15 @@ Record1ByteMemWrite(void *addr, context_handle_t cur_ctxt_hndl){
 void
 Record2ByteMemRead(void *addr){
     uint8_t *status = GetShadowBaseAddress(addr);
-    //dr_fprintf(gTraceFile, "2Byte read status: %p\n", status);
-
     // status == 0 if not created.
     if (PAGE_OFFSET((uint64_t)addr) != PAGE_OFFSET_MASK) {
         if (status) {
             *((uint16_t*)status + PAGE_OFFSET((uint64_t)addr)) = TWO_BYTE_READ_ACTION;
-            //dr_fprintf(gTraceFile, "if status: %p\n", status);
         }
     }
     else {
-        //dr_fprintf(gTraceFile, "else\n");
         if (status) {
             *(status + PAGE_OFFSET_MASK) = ONE_BYTE_READ_ACTION;
-            //dr_fprintf(gTraceFile, "else status: %p\n", status);
         }
         status = GetShadowBaseAddress(((char*)addr) + 1);
         
@@ -356,8 +296,6 @@ Record2ByteMemRead(void *addr){
 void
 Record2ByteMemWrite(void *addr, context_handle_t cur_ctxt_hndl) {
     uint8_t *status = GetOrCreateShadowBaseAddress(addr);
-    //dr_fprintf(gTraceFile, "2Byte write status: %p\n", status);
-    
     // status == 0 if not created
     if (PAGE_OFFSET((uint64_t)addr) != PAGE_OFFSET_MASK) {
         uint32_t *lastIP = (uint32_t*)(status + PAGE_SIZE + PAGE_OFFSET((uint64_t)addr * sizeof(uint32_t)));
@@ -1097,9 +1035,9 @@ void
 PrintIPAndCallingContexts(const DeadInfoForPresentation &di) {
     dr_fprintf(gTraceFile, "di.count is: %lu\n", di.count);
     dr_fprintf(gTraceFile, "--------------------------------\n");
-    drcctlib_print_backtrace(gTraceFile, di.pMergedDeadInfo->context1, false, true, -1);
+    drcctlib_print_backtrace(gTraceFile, di.pMergedDeadInfo->context1, true, true, -1);
     dr_fprintf(gTraceFile, "***************\n");
-    drcctlib_print_backtrace(gTraceFile, di.pMergedDeadInfo->context2, false, true, -1);
+    drcctlib_print_backtrace(gTraceFile, di.pMergedDeadInfo->context2, true, true, -1);
     dr_fprintf(gTraceFile, "--------------------------------\n");
 }
 
