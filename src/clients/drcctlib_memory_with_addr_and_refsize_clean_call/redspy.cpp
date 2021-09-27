@@ -116,18 +116,6 @@ typedef struct _per_thread_t {
     uint64_t bytesWritten;
 } per_thread_t;
 
-/*
-typedef struct AddrValPair {
-    void *address;
-    uint8_t value[MAX_WRITE_OP_LENGTH];
-} AddrValPair;
-
-typedef struct RedSpyThreadData {
-    AddrValPair buffer[MAX_WRITE_OPS_IN_INS];
-    uint64_t bytesWritten;
-} RedSpyThreadData;
-*/
-
 typedef struct RedanduncyData{
     context_handle_t dead;
     context_handle_t kill;
@@ -154,14 +142,6 @@ static void AddToRedTable(uint64_t key, uint16_t value, int threadID){
     //UNLOCK_RED_MAP();
 #endif
 }
-
-/*
-// to access thread-specific data
-inline RedSpyThreadData* ClientGetTLS(void *drcontext){
-    RedSpyThreadData *tdata = static_cast<RedSpyThreadData*>(drmgr_get_tls_field(drcontext, tls_idx));
-    return tdata;
-}
-*/
 
 template<int start, int end, int incr>
 struct UnrolledLoop{
@@ -225,52 +205,33 @@ struct RedSpyAnalysis{
                 return;
             }
         }
-        //dr_fprintf(gTraceFile, "AccessLen = %d\n", AccessLen);
         per_thread_t *pt = (per_thread_t *)drmgr_get_tls_field(drcontext, tls_idx);
         pt->bytesWritten += AccessLen;
-        
-        //dr_fprintf(gTraceFile, "bytewritten = %llu\n", pt->bytesWritten);
-        //dr_fprintf(gTraceFile, "addr = %p\n", addr);
-        //*((uint64_t *)(&(pt->value[memOp]))) = *(static_cast<uint64_t*>(addr));
         
         switch(AccessLen) {
             case 1: 
                 uint8_t temp1;
                 if (!dr_safe_read(addr, 1, &temp1, NULL))
                     return;
-                //dr_fprintf(gTraceFile, "before value = %" PRIu8 "\n", *((uint8_t *)(&(pt->value[memOp]))));
                 *((uint8_t *)(&(pt->value[memOp]))) = temp1;
-                //dr_fprintf(gTraceFile, "after value = %" PRIu8 "\n", *((uint8_t *)(&(pt->value[memOp]))));
                 break;
             case 2:
-                //*((uint16_t*)(pt->value[memOp])) = *(static_cast<uint16_t*>(addr));
                 uint16_t temp2;
                 if (!dr_safe_read(addr, 2, &temp2, NULL))
                     return;
-                //dr_fprintf(gTraceFile, "before value = %u\n", *((uint16_t *)(&(pt->value[memOp]))));
                 *((uint16_t *)(&(pt->value[memOp]))) = temp2;
-                //dr_fprintf(gTraceFile, "after value = %u\n", *((uint16_t *)(&(pt->value[memOp]))));
                 break;
             case 4:
                 uint32_t temp4;
                 if (!dr_safe_read(addr, 4, &temp4, NULL))
                     return;
-                //dr_fprintf(gTraceFile, "before value = %lu\n", *((uint32_t *)(&(pt->value[memOp]))));
                 *((uint32_t *)(&(pt->value[memOp]))) = temp4;
-                //dr_fprintf(gTraceFile, "after value = %lu\n", *((uint32_t *)(&(pt->value[memOp]))));
-                //*((uint32_t*)(pt->value[memOp])) = *(static_cast<uint32_t*>(addr));
                 break;
             case 8: 
-                // store the value of addr to temp8
                 uint64_t temp8;
                 if (!dr_safe_read(addr, 8, &temp8, NULL))
                     return;
-                //dr_fprintf(gTraceFile, "1. before value = %llu\n", *((uint64_t *)(&(pt->value[memOp]))));
                 *((uint64_t *)(&(pt->value[memOp]))) = temp8;
-                //dr_fprintf(gTraceFile, "2. after value = %llu\n", *((uint64_t *)(&(pt->value[memOp]))));
-                // print 1st here:
-                //dr_fprintf(gTraceFile, "(1) addr value = %llu\n", *((uint64_t *)(&(pt->value[memOp]))));
-                //*((uint64_t*)(pt->value[memOp])) = *(static_cast<uint64_t*>(addr));
                 break;
             //default:
                 //TODO 
@@ -289,13 +250,8 @@ struct RedSpyAnalysis{
                 uint8_t temp1;
                 if (!dr_safe_read(opAddr, 1, &temp1, NULL))
                     return;
-                //dr_fprintf(gTraceFile, "(2) new temp1 is %" PRIu8 "\n", temp1);
                 if (*((uint8_t *)(&(pt->value[memOp]))) == temp1){
-                    //dr_fprintf(gTraceFile, "in case 1, equal\n");
                     isRedundantWrite = true;
-                    if (temp1 == 0){
-                        zero++;
-                    }
                 }
                 break;
             }
@@ -304,11 +260,7 @@ struct RedSpyAnalysis{
                 if (!dr_safe_read(opAddr, 2, &temp2, NULL))
                     return;
                 if (*((uint16_t *)(&(pt->value[memOp]))) == temp2){
-                    //dr_fprintf(gTraceFile, "in case 2, equal\n");
                     isRedundantWrite = true;
-                    if (temp2 == 0){
-                        zero++;
-                    }
                 }
                 break;
             }
@@ -319,9 +271,6 @@ struct RedSpyAnalysis{
                 if (*((uint32_t *)(&(pt->value[memOp]))) == temp4){
                     //dr_fprintf(gTraceFile, "in case 4, equal\n");
                     isRedundantWrite = true;
-                    if (temp4 == 0){
-                        zero++;
-                    }
                 }
                 break;
             }
@@ -330,30 +279,16 @@ struct RedSpyAnalysis{
                 uint64_t temp8;
                 if (!dr_safe_read(opAddr, 8, &temp8, NULL))
                     return;
-                // print the 2nd addr here:
-                //dr_fprintf(gTraceFile, "(2) new temp8 is %lu\n", temp8);
-                // compare the before and after value in opAddr
                 if (*((uint64_t *)(&(pt->value[memOp]))) == temp8){
-                    //dr_fprintf(gTraceFile, "in case 8, equal\n");
                     isRedundantWrite = true;
-                    if (temp8 == 0){
-                        zero++;
-                    }
                 }
                 break;
             }
             //default:
                 //break;
         }
-        //dr_fprintf(gTraceFile, "zero = %d\n", zero);
-        //dr_fprintf(gTraceFile, "bool = %d\n", isRedundantWrite);
-
         uint8_t *status = GetOrCreateShadowBaseAddress((uint64_t)opAddr);
-        //dr_fprintf(gTraceFile, "size of = ")
-        // context_handle_t: int32_t
         int threadID = drcctlib_get_thread_id();
-        //thread_id_t threadID = dr_get_thread_id(drcontext);
-        //dr_fprintf(gTraceFile, "thread id = %d\n", threadID);
         context_handle_t *prevIP = (context_handle_t*)(status + PAGE_OFFSET((uint64_t)opAddr) * sizeof(context_handle_t));
         bool isAccessWithinPageBoundary = IS_ACCESS_WITHIN_PAGE_BOUNDARY((uint64_t)opAddr, AccessLen);
         if (isRedundantWrite) {
@@ -362,8 +297,6 @@ struct RedSpyAnalysis{
                 // All from the same context ?
                 if (UnrolledConjunction<0, AccessLen, 1>::Body( [&] (int index) -> bool {return (prevIP[index] == prevIP[0]); } )) {
                     // repory to RedTable
-                    //uint64_t key = MAKE_CONTEXT_PAIR(prevIP[0], cur_ctxt_hndl);
-                    //dr_fprintf(gTraceFile, "key = %llu\n", key);
                     AddToRedTable(MAKE_CONTEXT_PAIR(prevIP[0], cur_ctxt_hndl), AccessLen, threadID);
                     // update context
                     UnrolledLoop<0, AccessLen, 1>::Body( [&] (int index) -> void {
@@ -422,7 +355,6 @@ struct RedSpyInstrument{
         // get address and size of memOp
         void *addr = ref->addr;
         uint32_t refSize = ref->size;
-        //dr_fprintf(gTraceFile, "refSize = %d\n", refSize);
         switch(refSize) {
             case 1:
                 RedSpyAnalysis<1, readBufferSlotIndex>::RecordNByteValueBeforeWrite(addr, drcontext, memOp);
@@ -452,7 +384,6 @@ struct RedSpyInstrument{
     static void InstrumentValueAfterWriting(void *drcontext, context_handle_t cur_ctxt_hndl, op_ref *opList, uint32_t memOp){
         void *opAddr = opList->opAddr;
         uint32_t opSize = opList->opSize;
-        //dr_fprintf(gTraceFile, "opSize = %d\n", opSize);
         switch(opSize) {
             case 1:
                 RedSpyAnalysis<1, readBufferSlotIndex>::CheckNByteValueAfterWrite(opAddr, drcontext, cur_ctxt_hndl, memOp);
@@ -485,33 +416,24 @@ struct RedSpyInstrument{
 void
 BeforeWrite(void *drcontext, context_handle_t cur_ctxt_hndl, mem_ref_t *ref, int32_t num, int32_t num_write)
 {
-    // add online analysis here
-    //dr_fprintf(gTraceFile, "Before function: num_write = %d\n", num_write);
     int readBufferSlotIndex = 0;
     for(int32_t memOp = 0; memOp < num_write; memOp++){
-        //dr_fprintf(gTraceFile, "readBufferSlotIndex = %d\n", readBufferSlotIndex);
-        //dr_fprintf(gTraceFile, "memOp = %d\n", memOp);
         switch(readBufferSlotIndex){
             case 0:
                 // Read the value at location before this instruction
                 RedSpyInstrument<0>::InstrumentValueBeforeWriting(drcontext, cur_ctxt_hndl, ref, memOp);
-                //dr_fprintf(gTraceFile, "Case 0\n");
                 break;
             case 1:
                 RedSpyInstrument<1>::InstrumentValueBeforeWriting(drcontext, cur_ctxt_hndl, ref, memOp);
-                //dr_fprintf(gTraceFile, "Case 1\n");
                 break;
             case 2:
                 RedSpyInstrument<2>::InstrumentValueBeforeWriting(drcontext, cur_ctxt_hndl, ref, memOp);
-                //dr_fprintf(gTraceFile, "Case 2\n");
                 break;
             case 3:
                 RedSpyInstrument<3>::InstrumentValueBeforeWriting(drcontext, cur_ctxt_hndl, ref, memOp);
-                //dr_fprintf(gTraceFile, "Case 3\n");
                 break;
             case 4:
                 RedSpyInstrument<4>::InstrumentValueBeforeWriting(drcontext, cur_ctxt_hndl, ref, memOp);
-                //dr_fprintf(gTraceFile, "Case 4\n");
                 break;
             default:
                 //assert(0 && "NYI");
@@ -525,32 +447,25 @@ BeforeWrite(void *drcontext, context_handle_t cur_ctxt_hndl, mem_ref_t *ref, int
 void
 AfterWrite(void *drcontext, context_handle_t cur_ctxt_hndl, op_ref *opList, int32_t num, int32_t num_write){
     int readBufferSlotIndex = 0;
-    //f(gTraceFile, "num_write = %d\n", num_write);
     for(int32_t memOp = 0; memOp < num_write; memOp++){
         // read the value at this location after write
         switch(readBufferSlotIndex){
             case 0:
-                //dr_fprintf(gTraceFile, "case 0\n");
                 RedSpyInstrument<0>::InstrumentValueAfterWriting(drcontext, cur_ctxt_hndl, opList, memOp);
                 break;
             case 1:
-                //dr_fprintf(gTraceFile, "case 1\n");
                 RedSpyInstrument<1>::InstrumentValueAfterWriting(drcontext, cur_ctxt_hndl, opList, memOp);
                 break;
             case 2:
-                //dr_fprintf(gTraceFile, "case 2\n");
                 RedSpyInstrument<2>::InstrumentValueAfterWriting(drcontext, cur_ctxt_hndl, opList, memOp);
                 break;
             case 3:
-                //dr_fprintf(gTraceFile, "case 3\n");
                 RedSpyInstrument<3>::InstrumentValueAfterWriting(drcontext, cur_ctxt_hndl, opList, memOp);
                 break;
             case 4:
-                //dr_fprintf(gTraceFile, "case 4\n");
                 RedSpyInstrument<4>::InstrumentValueAfterWriting(drcontext, cur_ctxt_hndl, opList, memOp);
                 break;
             default:
-                //dr_fprintf(gTraceFile, "Run default\n");
                 break;
         }
         // use next slot for the next write op
@@ -705,8 +620,6 @@ InstrumentInsCallback(void *drcontext, instr_instrument_msg_t *instrument_msg)
     }
 #endif
 
-    //dr_fprintf(gTraceFile, "num_write = %d\n", num_write);
-    //dr_fprintf(gTraceFile, "num = %d\n", num);
     dr_insert_clean_call(drcontext, bb, instr, (void *)InsertCleancall, false, 3,
                          OPND_CREATE_CCT_INT(slot), OPND_CREATE_CCT_INT(num), OPND_CREATE_CCT_INT(num_write));
 }
@@ -717,20 +630,17 @@ static bool RedundancyCompare(const struct RedanduncyData &first, const struct R
 }
 
 void PrintRedundancyPairs(void * drcontext,int threadID) {
-    //dr_fprintf(gTraceFile, "PrintRedundancyPair here\n");
     vector<RedanduncyData> tmpList;
     vector<RedanduncyData>::iterator tmpIt;
     uint64_t grandTotalRedundantBytes = 0;
     dr_fprintf(gTraceFile, "********** Dump Data from Thread %d **********\n", threadID);
     for (unordered_map<uint64_t, uint64_t>::iterator it = RedMap[threadID].begin(); it != RedMap[threadID].end(); it++) {
-        // 
-        dr_fprintf(gTraceFile, "key in map = %llu\n", (*it).first);
+        //dr_fprintf(gTraceFile, "key in map = %llu\n", (*it).first);
         context_handle_t dead = DECODE_DEAD((*it).first);
         context_handle_t kill = DECODE_KILL((*it).first);
-        dr_fprintf(gTraceFile, "dead data: %lu, and kill data: %lu\n", dead, kill);
+        //dr_fprintf(gTraceFile, "dead data: %lu, and kill data: %lu\n", dead, kill);
 
         for (tmpIt = tmpList.begin(); tmpIt != tmpList.end(); tmpIt++) {
-            //f(gTraceFile, "run inner for\n");
             bool ct1 = false;
             if (dead == 0 || ((*tmpIt).dead) == 0) {
                 if (dead == 0 && ((*tmpIt).dead) == 0) 
@@ -738,9 +648,7 @@ void PrintRedundancyPairs(void * drcontext,int threadID) {
             } else {
                 ct1 = drcctlib_have_same_source_line(dead, (*tmpIt).dead);
             }
-            //dr_fprintf(gTraceFile, "ct1 = %d\n", ct1);
             bool ct2 = drcctlib_have_same_source_line(kill, (*tmpIt).kill);
-            //dr_fprintf(gTraceFile, "ct1 = %d, ct2 = %d\n", ct1, ct2);
             if (ct1 && ct2) {
                 (*tmpIt).frequency += (*it).second;
                 grandTotalRedundantBytes += (*it).second;
@@ -754,16 +662,12 @@ void PrintRedundancyPairs(void * drcontext,int threadID) {
         }
     }
     per_thread_t *pt = (per_thread_t *)drmgr_get_tls_field(drcontext, tls_idx);
-    //uint64_t tmp = pt->bytesWritten;
     dr_fprintf(gTraceFile, "\nTotal redundant bytes = %f %%\n", grandTotalRedundantBytes * 100.0 / (pt->bytesWritten));
 
     sort(tmpList.begin(), tmpList.end(), RedundancyCompare);
-    //vector<struct AnalyzedMetric_t>::iterator listIt;
     vector<RedanduncyData>::iterator listIt;
     int cntxNum = 0;
-    //int i = 0;
     for (listIt = tmpList.begin(); listIt != tmpList.end(); listIt++) {
-        //i++;
         if (cntxNum < MAX_CONTEXTS) {
             dr_fprintf(gTraceFile, "\n========== (%f) %% ==========\n", (*listIt).frequency * 100.0 / grandTotalRedundantBytes);
             if ((*listIt).dead == 0) {
@@ -782,16 +686,7 @@ void PrintRedundancyPairs(void * drcontext,int threadID) {
         }
         cntxNum++;
     }
-    //dr_fprintf(gTraceFile, "i: %d\n", i);
 }
-
-
-
-/*
-static void
-InitThreadData(RedSpyThreadData *tdata){
-    tdata->bytesWritten = 0;
-}*/
 
 static void
 ClientThreadStart(void *drcontext)
@@ -805,7 +700,6 @@ ClientThreadStart(void *drcontext)
     pt->cur_buf = dr_get_dr_segment_base(tls_seg);
     pt->cur_buf_list =
         (mem_ref_t *)dr_global_alloc(TLS_MEM_REF_BUFF_SIZE * sizeof(mem_ref_t));
-    //pt->opList = dr_global_alloc(TLS_MEM_REF_BUFF_SIZE * sizeof(uint64_t));
     BUF_PTR(pt->cur_buf, mem_ref_t, INSTRACE_TLS_OFFS_BUF_PTR) = pt->cur_buf_list;
 
 }
@@ -815,20 +709,15 @@ ClientThreadEnd(void *drcontext)
 {
     per_thread_t *pt = (per_thread_t *)drmgr_get_tls_field(drcontext, tls_idx);
     dr_global_free(pt->cur_buf_list, TLS_MEM_REF_BUFF_SIZE * sizeof(mem_ref_t));
-    //dr_global_free(pt->opList, TLS_MEM_REF_BUFF_SIZE * sizeof(uint64_t));
     dr_thread_free(drcontext, pt, sizeof(per_thread_t));
 
-    // TODO
-    // ask Qidong if it's ok to dump data here
-    // and if it's ok to get threadID here
     int threadID = drcctlib_get_thread_id();
-    //thread_id_t threadID = dr_get_thread_id(drcontext);
-    //dr_fprintf(gTraceFile, "ClientThreadEnd thread id = %d\n", threadID);
     
     // need lock for drcctlib_have_same_source_line
     dr_mutex_lock(lock);
     PrintRedundancyPairs(drcontext, threadID);
     dr_mutex_unlock(lock);
+    // clear the map
     RedMap[threadID].clear();
 }
 
@@ -836,7 +725,7 @@ static void
 ClientInit(int argc, const char *argv[])
 {
     char name[MAXIMUM_PATH] = "";
-    DRCCTLIB_INIT_LOG_FILE_NAME(name, "test", "out");
+    DRCCTLIB_INIT_LOG_FILE_NAME(name, "red", "out");
     gTraceFile = dr_open_file(name, DR_FILE_WRITE_OVERWRITE | DR_FILE_ALLOW_LARGE);
     DR_ASSERT(gTraceFile != INVALID_FILE);
     dr_fprintf(gTraceFile, "ClientInit\n");
@@ -849,10 +738,6 @@ ClientExit(void)
 {
     // add output module here
     dr_fprintf(gTraceFile, "ClientExit\n");
-    //int threadID = drcctlib_get_thread_id();
-    //thread_id_t threadID = dr_get_thread_id(drcontext);
-    //dr_fprintf(gTraceFile, "thread id in ClientExit = %d\n", threadID);
-
     drcctlib_exit();
 
     if (!dr_raw_tls_cfree(tls_offs, INSTRACE_TLS_COUNT)) {
