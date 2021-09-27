@@ -805,6 +805,7 @@ dr_client_main(client_id_t id, int argc, const char *argv[])
             "ERROR: drcctlib_memory_with_addr_and_refsize_clean_call dr_raw_tls_calloc fail");
     }
     drcctlib_init(CustomFilter, INVALID_FILE, InstrumentInsCallback, false);
+    // drcctlib_init(DRCCTLIB_FILTER_MEM_ACCESS_INSTR, INVALID_FILE, InstrumentInsCallback, false);
     // add print function
     dr_register_exit_event(ClientExit);
 }
