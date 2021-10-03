@@ -22,6 +22,7 @@
 #include "drreg.h"
 #include "drutil.h"
 #include "drcctlib.h"
+#include "shadow_memory_ml.h"
 
 using namespace std;
 
@@ -32,6 +33,8 @@ using namespace std;
                                           ##_ARGS)
 
 static int tls_idx;
+static int memOp_num; 
+static int zero = 0;
 
 // __thread bool Sample_flag = true;
 // __thread long long NUM_INS = 0;
@@ -79,6 +82,8 @@ thread_local long long NUM_INS = 0;
 static file_t gTraceFile;
 static uint8_t** gL1PageTable[LEVEL_1_PAGE_TABLE_SIZE];
 
+static  ConcurrentShadowMemoryMl<context_handle_t> sm;
+
 
 enum {
     INSTRACE_TLS_OFFS_BUF_PTR,
@@ -100,12 +105,27 @@ typedef struct _mem_ref_t {
     size_t size;
 } mem_ref_t;
 
+typedef struct op_ref{
+    uint64_t *opAddr;
+    uint32_t opSize;
+}op_ref;
+
 typedef struct _per_thread_t {
     mem_ref_t *cur_buf_list;
     void *cur_buf;
+    op_ref opList[MAX_WRITE_OPS_IN_INS];
+    //uint64_t opList[MAX_WRITE_OPS_IN_INS];
+    uint64_t value[MAX_WRITE_OPS_IN_INS];
+    uint64_t bytesWritten;
 } per_thread_t;
 
-//void *lock;
+typedef struct RedanduncyData{
+    context_handle_t dead;
+    context_handle_t kill;
+    uint64_t frequency;
+} RedanduncyData;
+
+void *lock;
 
 static unordered_map<uint64_t, uint64_t> RedMap[THREAD_MAX];
 //static unordered_map<int, unordered_map<uint64_t, uint64_t>> RedMap;
@@ -126,6 +146,7 @@ static void AddToRedTable(uint64_t key, uint16_t value, int threadID){
 #endif
 }
 
+/*
 template<int start, int end, int incr>
 struct UnrolledLoop{
     static void Body(function<void (const int)> func){
@@ -139,18 +160,61 @@ struct UnrolledLoop<end, end, incr>{
     static void Body(function<void (const int)> func){
         // empty body
     }
+};*/
+
+
+// for redspy temporal analysis
+template<int start, int end, int incr, bool conditional>
+struct UnrolledLoop{
+    static void Body(function<void (const int)> func){
+        func(start); // Real loop body
+        UnrolledLoop<start+incr, end, incr, conditional>::Body(func); // unroll next iteration
+    }
+    static void BodySamePage(context_handle_t *prevIP, const context_handle_t handle, int threadID){
+        if(conditional){
+            AddToRedTable(MAKE_CONTEXT_PAIR(prevIP[start], handle), 1, threadID);
+        }
+        // update context
+        prevIP[start] = handle;
+        UnrolledLoop<start+incr, end, incr, conditional>::BodySamePage(prevIP, handle, threadID); // unroll next iteration
+    }
+    static void BodyStraddlePage(uint64_t addr, const context_handle_t handle, int threadID){
+        uint8_t *status = (uint8_t *) get<0>(sm.GetOrCreateShadowBaseAddress((uint64_t)addr + start));
+        context_handle_t *prevIP = (context_handle_t*)(status + PAGE_OFFSET(((uint64_t)addr + start)) * sizeof(context_handle_t));
+        if (conditional) {
+            // add to RedTable
+            AddToRedTable(MAKE_CONTEXT_PAIR(prevIP[0], handle), 1, threadID);
+        }
+        // update context
+        prevIP[0] = handle;
+        UnrolledLoop<start+incr, end, incr, conditional>::BodyStraddlePage(addr, handle, threadID); // unroll the next iteration
+    }
 };
+
+template<int end, int incr, bool conditional>
+struct UnrolledLoop<end, end, incr, conditional>{
+    static void Body(function<void (const int)> func){}
+    static void BodySamePage(context_handle_t *prevIP, const context_handle_t handle, int threadID){}
+    static void BodyStraddlePage(uint64_t addr, const context_handle_t handle, int threadID){}
+};
+
 
 template<int start, int end, int incr>
 struct UnrolledConjunction{
     static bool Body(function<bool (const int)> func){
         return func(start) && UnrolledConjunction<start+incr, end, incr>::Body(func); // unroll next iteration
     }
+    static bool BodyContextCheck(context_handle_t *prevIP){
+        return (prevIP[0] == prevIP[start]) && UnrolledConjunction<start+incr, end, incr>::BodyContextCheck(prevIP); // unroll next iteration
+    }
 };
 
 template<int end, int incr>
 struct UnrolledConjunction<end, end, incr>{
     static bool Body(function<void (const int)> func){
+        return true;
+    }
+    static bool BodyContextCheck(context_handle_t *prevIP){
         return true;
     }
 };
@@ -171,10 +235,354 @@ static uint8_t* GetOrCreateShadowBaseAddress(uint64_t addr){
 }
 */
 
+template<uint16_t AccessLen, uint32_t bufferOffset>
+struct RedSpyAnalysis{
+    static void RecordNByteValueBeforeWrite(void *addr, void* drcontext, uint32_t memOp){
+        if(Sample_flag){
+            NUM_INS++;
+            if(NUM_INS > WINDOW_ENABLE){
+                Sample_flag = false;
+                NUM_INS = 0;
+                return;
+            }
+        }else{
+            NUM_INS++;
+            if(NUM_INS > WINDOW_DISABLE){
+                Sample_flag = true;
+                NUM_INS = 0;
+            }else{
+                return;
+            }
+        }
+        per_thread_t *pt = (per_thread_t *)drmgr_get_tls_field(drcontext, tls_idx);
+        pt->bytesWritten += AccessLen;
+        
+        switch(AccessLen) {
+            case 1: 
+                uint8_t temp1;
+                if (!dr_safe_read(addr, 1, &temp1, NULL))
+                    return;
+                *((uint8_t *)(&(pt->value[memOp]))) = temp1;
+                break;
+            case 2:
+                uint16_t temp2;
+                if (!dr_safe_read(addr, 2, &temp2, NULL))
+                    return;
+                *((uint16_t *)(&(pt->value[memOp]))) = temp2;
+                break;
+            case 4:
+                uint32_t temp4;
+                if (!dr_safe_read(addr, 4, &temp4, NULL))
+                    return;
+                *((uint32_t *)(&(pt->value[memOp]))) = temp4;
+                break;
+            case 8: 
+                uint64_t temp8;
+                if (!dr_safe_read(addr, 8, &temp8, NULL))
+                    return;
+                *((uint64_t *)(&(pt->value[memOp]))) = temp8;
+                break;
+            //default:
+                //TODO 
+                //break;
+        }
+    }
+    
+    static void CheckNByteValueAfterWrite(void* opAddr, void* drcontext, context_handle_t cur_ctxt_hndl, uint32_t memOp){
+        if(!Sample_flag){
+            return;
+        }
+        bool isRedundantWrite = false;
+        per_thread_t *pt = (per_thread_t *)drmgr_get_tls_field(drcontext, tls_idx);
+        switch(AccessLen) {
+            case 1:{
+                uint8_t temp1;
+                if (!dr_safe_read(opAddr, 1, &temp1, NULL))
+                    return;
+                if (*((uint8_t *)(&(pt->value[memOp]))) == temp1){
+                    isRedundantWrite = true;
+                }
+                break;
+            }
+            case 2:{
+                uint16_t temp2;
+                if (!dr_safe_read(opAddr, 2, &temp2, NULL))
+                    return;
+                if (*((uint16_t *)(&(pt->value[memOp]))) == temp2){
+                    isRedundantWrite = true;
+                }
+                break;
+            }
+            case 4:{
+                uint32_t temp4;
+                if (!dr_safe_read(opAddr, 4, &temp4, NULL))
+                    return;
+                if (*((uint32_t *)(&(pt->value[memOp]))) == temp4){
+                    //dr_fprintf(gTraceFile, "in case 4, equal\n");
+                    isRedundantWrite = true;
+                }
+                break;
+            }
+            case 8:{
+                // store the value of opAddr to temp8
+                uint64_t temp8;
+                if (!dr_safe_read(opAddr, 8, &temp8, NULL))
+                    return;
+                if (*((uint64_t *)(&(pt->value[memOp]))) == temp8){
+                    isRedundantWrite = true;
+                }
+                break;
+            }
+            //default:
+                //break;
+        }
+        uint8_t *status = (uint8_t *) get<0>(sm.GetOrCreateShadowBaseAddress((uint64_t)opAddr));
+        //uint8_t *status = GetOrCreateShadowBaseAddress((uint64_t)opAddr);
+        int threadID = drcctlib_get_thread_id();
+        context_handle_t *prevIP = (context_handle_t*)(status + PAGE_OFFSET((uint64_t)opAddr) * sizeof(context_handle_t));
+        bool isAccessWithinPageBoundary = IS_ACCESS_WITHIN_PAGE_BOUNDARY((uint64_t)opAddr, AccessLen);
+        if (isRedundantWrite) {
+            if (isAccessWithinPageBoundary) {
+                // all from the same context?
+                if (UnrolledConjunction<0, AccessLen, 1>::BodyContextCheck(prevIP)) {
+                    // add to redtable
+                    AddToRedTable(MAKE_CONTEXT_PAIR(prevIP[0], cur_ctxt_hndl), AccessLen, threadID);
+                    // update conxt
+                    UnrolledLoop<0, AccessLen, 1, true>::BodySamePage(prevIP, cur_ctxt_hndl, threadID);
+                } else {
+                    // different contexts
+                    UnrolledLoop<0, AccessLen, 1, true>::BodySamePage(prevIP, cur_ctxt_hndl, threadID);
+                }
+            } else {
+                // write across a 64k page boundary
+                // first byte is on this page though
+                AddToRedTable(MAKE_CONTEXT_PAIR(prevIP[0], cur_ctxt_hndl), 1, threadID);
+                // update contexts
+                prevIP[0] = cur_ctxt_hndl;
+                // remaining bytes (from 1 to AccessLen) across a 64k page boundary
+                UnrolledLoop<1, AccessLen, 1, true>::BodyStraddlePage((uint64_t)opAddr, cur_ctxt_hndl, threadID);
+            }
+        } else {
+            // No redundancy, just update contexts
+            if (isAccessWithinPageBoundary) {
+                // update context
+                UnrolledLoop<0, AccessLen, 1, false>::BodySamePage(prevIP, cur_ctxt_hndl, threadID);
+            } else {
+                // write across 64k page boundary
+                // update context
+                prevIP[0] = cur_ctxt_hndl;
+                // remaining bytes (from 1 to AccessLen) somewhere acoss a 64k page boundary
+                UnrolledLoop<1, AccessLen, 1, false>::BodyStraddlePage((uint64_t)opAddr, cur_ctxt_hndl, threadID);
+            }
+        }
+        /*if (isRedundantWrite) {
+            // redundancy detected
+            if(isAccessWithinPageBoundary){
+                // All from the same context ?
+                if (UnrolledConjunction<0, AccessLen, 1>::Body( [&] (int index) -> bool {return (prevIP[index] == prevIP[0]); } )) {
+                //if (UnrolledConjunction<0, AccessLen, 1>::BodyContextCheck(prevIP)) {
+                    // repory to RedTable
+                    AddToRedTable(MAKE_CONTEXT_PAIR(prevIP[0], cur_ctxt_hndl), AccessLen, threadID);
+                    // update context
+                    UnrolledLoop<0, AccessLen, 1>::Body( [&] (int index) -> void {
+                        // update context
+                        prevIP[index] = cur_ctxt_hndl;
+                    });
+                } else {
+                    // different contexts
+                    UnrolledLoop<0, AccessLen, 1>::Body( [&] (int index) -> void {
+                        // report in RedTable
+                        AddToRedTable(MAKE_CONTEXT_PAIR(prevIP[index], cur_ctxt_hndl), 1, threadID);
+                        // update context
+                        prevIP[index] = cur_ctxt_hndl;
+                    });
+                }
+            } else {
+                // write across a 64k page boundary
+                // first byte is on this page though
+                AddToRedTable(MAKE_CONTEXT_PAIR(prevIP[0], cur_ctxt_hndl), 1, threadID);
+                // update context
+                prevIP[0] = cur_ctxt_hndl;
+                // remaining bytes (from 1 to AccessLen) across a 64k page boundary
+                UnrolledLoop<1, AccessLen, 1>::Body( [&] (int index) -> void {
+                    status = GetOrCreateShadowBaseAddress((uint64_t)opAddr + index);
+                    prevIP = (context_handle_t*)(status + PAGE_OFFSET(((uint64_t)opAddr + index)) * sizeof(context_handle_t));
+                    // report in RedTable
+                    AddToRedTable(MAKE_CONTEXT_PAIR(prevIP[0], cur_ctxt_hndl), 1, threadID);
+                    // update context
+                    prevIP[0] = cur_ctxt_hndl;
+                });
+            }
+        } else {
+            // no redundancy, just update context
+            if (isAccessWithinPageBoundary) {
+                UnrolledLoop<0, AccessLen, 1>::Body( [&] (int index) -> void {
+                    // all from the same context
+                    // update context
+                    prevIP[index] = cur_ctxt_hndl;
+                });
+            } else {
+                // write across a 64k page boundary
+                UnrolledLoop<0, AccessLen, 1>::Body( [&] (int index) -> void {
+                    status = GetOrCreateShadowBaseAddress((uint64_t)opAddr + index);
+                    prevIP = (context_handle_t*)(status + PAGE_OFFSET(((uint64_t)opAddr + index)) * sizeof(context_handle_t));
+                    // update context
+                    prevIP[0] = cur_ctxt_hndl;
+                });
+            }
+        }*/
+    }
+};
+
+template<uint32_t readBufferSlotIndex>
+struct RedSpyInstrument{
+    static void InstrumentValueBeforeWriting(void *drcontext, context_handle_t cur_ctxt_hndl, mem_ref_t *ref, uint32_t memOp){
+        // get address and size of memOp
+        void *addr = ref->addr;
+        uint32_t refSize = ref->size;
+        switch(refSize) {
+            case 1:
+                RedSpyAnalysis<1, readBufferSlotIndex>::RecordNByteValueBeforeWrite(addr, drcontext, memOp);
+                break;
+            case 2:
+                RedSpyAnalysis<2, readBufferSlotIndex>::RecordNByteValueBeforeWrite(addr, drcontext, memOp);
+                break;
+            case 4:
+                RedSpyAnalysis<4, readBufferSlotIndex>::RecordNByteValueBeforeWrite(addr, drcontext, memOp);
+                break;
+            case 8:
+                RedSpyAnalysis<8, readBufferSlotIndex>::RecordNByteValueBeforeWrite(addr, drcontext, memOp);
+                break;
+            case 10:
+                RedSpyAnalysis<10, readBufferSlotIndex>::RecordNByteValueBeforeWrite(addr, drcontext, memOp);
+                break;
+            case 16:
+                RedSpyAnalysis<16, readBufferSlotIndex>::RecordNByteValueBeforeWrite(addr, drcontext, memOp);
+                break;
+            default:
+                // TODO
+                // RecordValueBeforeLargeWrite();
+                break;
+        }
+
+    }
+    static void InstrumentValueAfterWriting(void *drcontext, context_handle_t cur_ctxt_hndl, op_ref *opList, uint32_t memOp){
+        void *opAddr = opList->opAddr;
+        uint32_t opSize = opList->opSize;
+        switch(opSize) {
+            case 1:
+                RedSpyAnalysis<1, readBufferSlotIndex>::CheckNByteValueAfterWrite(opAddr, drcontext, cur_ctxt_hndl, memOp);
+                break;
+            case 2:
+                RedSpyAnalysis<2, readBufferSlotIndex>::CheckNByteValueAfterWrite(opAddr, drcontext, cur_ctxt_hndl, memOp);
+                break;
+            case 4:
+                RedSpyAnalysis<4, readBufferSlotIndex>::CheckNByteValueAfterWrite(opAddr, drcontext, cur_ctxt_hndl, memOp);
+                break;
+            case 8:
+                RedSpyAnalysis<8, readBufferSlotIndex>::CheckNByteValueAfterWrite(opAddr, drcontext,  cur_ctxt_hndl, memOp);
+                break;
+            case 10:
+                RedSpyAnalysis<10, readBufferSlotIndex>::CheckNByteValueAfterWrite(opAddr, drcontext, cur_ctxt_hndl, memOp);
+                break;
+            case 16:
+                RedSpyAnalysis<16, readBufferSlotIndex>::CheckNByteValueAfterWrite(opAddr, drcontext, cur_ctxt_hndl, memOp);
+                break;
+            default:
+                // TODO
+                // CheckAfterLargeWrite();
+                break;
+        }
+    }
+};
+
 
 void
-DoWhatClientWantToDo(void *drcontext, context_handle_t cur_ctxt_hndl, mem_ref_t *ref){
-    
+InstrumentGeneralReg(){
+    // for general register
+    // ARM has 13 general register R0-R12
+    // 1 stack pointer (SP/R13) and 1 link register (LR/R14)
+}
+
+void
+InstrumentAliasReg(){
+    // for alias register
+}
+
+
+// client want to do
+void
+BeforeWrite(void *drcontext, context_handle_t cur_ctxt_hndl, mem_ref_t *ref, int32_t num, int32_t num_write)
+{
+    int readBufferSlotIndex = 0;
+    for(int32_t memOp = 0; memOp < num_write; memOp++){
+        switch(readBufferSlotIndex){
+            case 0:
+                // Read the value at location before this instruction
+                RedSpyInstrument<0>::InstrumentValueBeforeWriting(drcontext, cur_ctxt_hndl, ref, memOp);
+                break;
+            case 1:
+                RedSpyInstrument<1>::InstrumentValueBeforeWriting(drcontext, cur_ctxt_hndl, ref, memOp);
+                break;
+            case 2:
+                RedSpyInstrument<2>::InstrumentValueBeforeWriting(drcontext, cur_ctxt_hndl, ref, memOp);
+                break;
+            case 3:
+                RedSpyInstrument<3>::InstrumentValueBeforeWriting(drcontext, cur_ctxt_hndl, ref, memOp);
+                break;
+            case 4:
+                RedSpyInstrument<4>::InstrumentValueBeforeWriting(drcontext, cur_ctxt_hndl, ref, memOp);
+                break;
+            default:
+                //assert(0 && "NYI");
+                break;
+        }
+        // use next slot for the next write operand
+        readBufferSlotIndex++;   
+    }
+    // register analysis
+    // instrument register writes to find redundancy
+}
+
+void
+AfterWrite(void *drcontext, context_handle_t cur_ctxt_hndl, op_ref *opList, int32_t num, int32_t num_write){
+    int readBufferSlotIndex = 0;
+    for(int32_t memOp = 0; memOp < num_write; memOp++){
+        // read the value at this location after write
+        switch(readBufferSlotIndex){
+            case 0:
+                RedSpyInstrument<0>::InstrumentValueAfterWriting(drcontext, cur_ctxt_hndl, opList, memOp);
+                break;
+            case 1:
+                RedSpyInstrument<1>::InstrumentValueAfterWriting(drcontext, cur_ctxt_hndl, opList, memOp);
+                break;
+            case 2:
+                RedSpyInstrument<2>::InstrumentValueAfterWriting(drcontext, cur_ctxt_hndl, opList, memOp);
+                break;
+            case 3:
+                RedSpyInstrument<3>::InstrumentValueAfterWriting(drcontext, cur_ctxt_hndl, opList, memOp);
+                break;
+            case 4:
+                RedSpyInstrument<4>::InstrumentValueAfterWriting(drcontext, cur_ctxt_hndl, opList, memOp);
+                break;
+            default:
+                break;
+        }
+        // use next slot for the next write op
+        readBufferSlotIndex++;
+    }
+}
+
+void
+InstrumentRegPreWrite(void *drcontext, context_handle_t cur_ctxt_hndl, int32_t num_reg) {
+    dr_mcontext_t mc = {sizeof(mc), DR_MC_ALL};
+    dr_get_mcontext(drcontext, &mc);
+    reg_id_t reg_tmp;
+}
+
+void 
+InstrumentRegPostWrite() {
+    // 
 }
 
 // dr clean call
@@ -185,22 +593,43 @@ InsertCleancall(int32_t slot, int32_t num, int32_t num_write)
     per_thread_t *pt = (per_thread_t *)drmgr_get_tls_field(drcontext, tls_idx);
     context_handle_t cur_ctxt_hndl = drcctlib_get_context_handle(drcontext, slot);
     
-    /*
-    // change the order of for loop and if condition
+    // implement two callbacks
+    // 2. get the values in addrs after the write
     for (int i = 0; i < memOp_num; i++){
         if(pt->opList[i].opAddr != 0) {
             AfterWrite(drcontext, cur_ctxt_hndl, &pt->opList[i], num, num_write);
         }
     }
-    */
+    
+    // 1. get the values in addrs before the write 
     for (int i = 0; i < num; i++) {
         if (pt->cur_buf_list[i].addr != 0) {
-            DoWhatClientWantToDo(drcontext, cur_ctxt_hndl, &pt->cur_buf_list[i]);
+            // store the addr and size of ops in opList[]
+            // check the values in addr after running ins
+            pt->opList[i].opAddr = (uint64_t*)((&pt->cur_buf_list[i])->addr);
+            pt->opList[i].opSize = (uint32_t)((&pt->cur_buf_list[i])->size);
+            BeforeWrite(drcontext, cur_ctxt_hndl, &pt->cur_buf_list[i], num, num_write);
+        } else {
+            pt->opList[i].opAddr = 0;
+            pt->opList[i].opSize = 0;
         }
     }
-    //memOp_num = num;
+    memOp_num = num;
     BUF_PTR(pt->cur_buf, mem_ref_t, INSTRACE_TLS_OFFS_BUF_PTR) = pt->cur_buf_list;
 }
+
+void
+InsertCleancallReg(int32_t slot, int32_t num_reg) {
+    void *drcontext = dr_get_current_drcontext();
+    per_thread_t *pt = (per_thread_t *)drmgr_get_tls_field(drcontext, tls_idx);
+    context_handle_t cur_ctxt_hndl = drcctlib_get_context_handle(drcontext, slot);
+
+    //dr_fprintf(gTraceFile, "reg: %llu\n", mc);
+    for (int i = 0; i < num_reg; i++) {
+        InstrumentRegPreWrite(drcontext, cur_ctxt_hndl, num_reg);
+    }
+}
+
 
 // insert
 static void
@@ -293,6 +722,7 @@ InstrumentInsCallback(void *drcontext, instr_instrument_msg_t *instrument_msg)
     int num = 0;
     //int num_read = 0;
     int num_write = 0;
+    int num_reg = 0;
     //int op = 0; //read is 0, write is 1
 
     /*for (int i = 0; i < instr_num_srcs(instr); i++) {
@@ -306,10 +736,28 @@ InstrumentInsCallback(void *drcontext, instr_instrument_msg_t *instrument_msg)
                          OPND_CREATE_CCT_INT(slot), OPND_CREATE_CCT_INT(num), OPND_CREATE_CCT_INT(num_read), OPND_CREATE_CCT_INT(num_write), OPND_CREATE_CCT_INT(op));
     */
 
+    // register analysis
+    for (int i = 0; i < instr_num_dsts(instr); i++) {
+        if (opnd_is_reg(instr_get_dst(instr, i))) {
+            opnd_t reg = instr_get_dst(instr, i);
+            //dr_fprintf(gTraceFile, "is register op\n");
+            num_reg++;
+            //dr_fprintf(gTraceFile, "opnd: %d\n", instr_get_dst(instr, i));
+            //dr_fprintf(gTraceFile, "opnd2: %d\n", reg);
+            reg_id_t reg_id = opnd_get_reg(reg);
+            const char *reg_name = get_register_name(reg_id);
+            //dr_fprintf(gTraceFile, "name is %s\n", reg_name);
+            InstrumentMem(drcontext, bb, instr, instr_get_dst(instr, i));
+        }
+    }
+    dr_insert_clean_call(drcontext, bb, instr, (void *)InsertCleancallReg, false, 2,
+                         OPND_CREATE_CCT_INT(slot), OPND_CREATE_CCT_INT(num_reg));
+
     for (int i = 0; i < instr_num_dsts(instr); i++) {
         if (opnd_is_memory_reference(instr_get_dst(instr, i))) { //dst = write
             num++;
             num_write++;
+            //op = 1;
             InstrumentMem(drcontext, bb, instr, instr_get_dst(instr, i));
         }
     }
@@ -321,6 +769,70 @@ InstrumentInsCallback(void *drcontext, instr_instrument_msg_t *instrument_msg)
 
     dr_insert_clean_call(drcontext, bb, instr, (void *)InsertCleancall, false, 3,
                          OPND_CREATE_CCT_INT(slot), OPND_CREATE_CCT_INT(num), OPND_CREATE_CCT_INT(num_write));
+}
+
+
+static bool RedundancyCompare(const struct RedanduncyData &first, const struct RedanduncyData &second) {
+    return first.frequency > second.frequency ? true : false;
+}
+
+void PrintRedundancyPairs(void * drcontext,int threadID) {
+    vector<RedanduncyData> tmpList;
+    vector<RedanduncyData>::iterator tmpIt;
+    uint64_t grandTotalRedundantBytes = 0;
+    dr_fprintf(gTraceFile, "********** Dump Data from Thread %d **********\n", threadID);
+    for (unordered_map<uint64_t, uint64_t>::iterator it = RedMap[threadID].begin(); it != RedMap[threadID].end(); it++) {
+        dr_fprintf(gTraceFile, "key in map = %llu\n", (*it).first);
+        context_handle_t dead = DECODE_DEAD((*it).first);
+        context_handle_t kill = DECODE_KILL((*it).first);
+        dr_fprintf(gTraceFile, "dead data: %lu, and kill data: %lu\n", dead, kill);
+
+        for (tmpIt = tmpList.begin(); tmpIt != tmpList.end(); tmpIt++) {
+            bool ct1 = false;
+            if (dead == 0 || ((*tmpIt).dead) == 0) {
+                if (dead == 0 && ((*tmpIt).dead) == 0) 
+                    ct1 = true;
+            } else {
+                ct1 = drcctlib_have_same_source_line(dead, (*tmpIt).dead);
+            }
+            bool ct2 = drcctlib_have_same_source_line(kill, (*tmpIt).kill);
+            if (ct1 && ct2) {
+                (*tmpIt).frequency += (*it).second;
+                grandTotalRedundantBytes += (*it).second;
+                break;
+            }
+        }
+        if (tmpIt == tmpList.end()) {
+            RedanduncyData tmp = { dead, kill, (*it).second};
+            tmpList.push_back(tmp);
+            grandTotalRedundantBytes += tmp.frequency;
+        }
+    }
+    per_thread_t *pt = (per_thread_t *)drmgr_get_tls_field(drcontext, tls_idx);
+    dr_fprintf(gTraceFile, "\nTotal redundant bytes = %f %%\n", grandTotalRedundantBytes * 100.0 / (pt->bytesWritten));
+
+    sort(tmpList.begin(), tmpList.end(), RedundancyCompare);
+    vector<RedanduncyData>::iterator listIt;
+    int cntxNum = 0;
+    for (listIt = tmpList.begin(); listIt != tmpList.end(); listIt++) {
+        if (cntxNum < MAX_CONTEXTS) {
+            dr_fprintf(gTraceFile, "\n========== (%f) %% ==========\n", (*listIt).frequency * 100.0 / grandTotalRedundantBytes);
+            if ((*listIt).dead == 0) {
+                dr_fprintf(gTraceFile, "\nPrepopulated with by OS\n");
+            } else {
+                //drcctlib_print_full_cct(gTraceFile, (*listIt).dead, true, false, -1);
+                drcctlib_print_backtrace(gTraceFile, (*listIt).dead, false, true, -1);
+                dr_fprintf(gTraceFile, "dead context: %lu\n", (*listIt).dead);
+            }
+            dr_fprintf(gTraceFile, "--------------------Redundantly written by--------------------\n");
+            drcctlib_print_backtrace(gTraceFile, (*listIt).kill, false, true, -1);
+            dr_fprintf(gTraceFile, "kill context: %lu\n", (*listIt).kill);
+        }
+        else {
+            break;
+        }
+        cntxNum++;
+    }
 }
 
 static void
@@ -345,6 +857,15 @@ ClientThreadEnd(void *drcontext)
     per_thread_t *pt = (per_thread_t *)drmgr_get_tls_field(drcontext, tls_idx);
     dr_global_free(pt->cur_buf_list, TLS_MEM_REF_BUFF_SIZE * sizeof(mem_ref_t));
     dr_thread_free(drcontext, pt, sizeof(per_thread_t));
+
+    int threadID = drcctlib_get_thread_id();
+    
+    // need lock for drcctlib_have_same_source_line
+    dr_mutex_lock(lock);
+    PrintRedundancyPairs(drcontext, threadID);
+    dr_mutex_unlock(lock);
+    // clear the map
+    RedMap[threadID].clear();
 }
 
 static void
@@ -355,7 +876,7 @@ ClientInit(int argc, const char *argv[])
     gTraceFile = dr_open_file(name, DR_FILE_WRITE_OVERWRITE | DR_FILE_ALLOW_LARGE);
     DR_ASSERT(gTraceFile != INVALID_FILE);
     dr_fprintf(gTraceFile, "ClientInit\n");
-    //lock = dr_mutex_create();
+    lock = dr_mutex_create();
     
 }
 
@@ -381,7 +902,7 @@ ClientExit(void)
         DRCCTLIB_PRINTF("failed to exit drreg");
     }
     drutil_exit();
-    //dr_mutex_destroy(lock);
+    dr_mutex_destroy(lock);
 }
 
 
