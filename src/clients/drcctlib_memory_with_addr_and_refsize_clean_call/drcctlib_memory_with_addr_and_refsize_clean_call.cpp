@@ -16,6 +16,7 @@
 #include <functional>
 #include <vector>
 #include <algorithm>
+#include <list>
 
 #include "dr_api.h"
 #include "drmgr.h"
@@ -34,7 +35,8 @@ using namespace std;
 
 static int tls_idx;
 static int memOp_num; 
-static int zero = 0;
+// static int zero = 0;
+static uint64_t prev_ins = 0;
 
 // __thread bool Sample_flag = true;
 // __thread long long NUM_INS = 0;
@@ -47,6 +49,7 @@ thread_local long long NUM_INS = 0;
 #define MAX_WRITE_OP_LENGTH (512)
 #define MAX_WRITE_OPS_IN_INS (8)
 #define THREAD_MAX (1024)
+#define REG_NUM 10
 
 /* infrastructure for shadow memory */
 /* MACROs */
@@ -82,7 +85,7 @@ thread_local long long NUM_INS = 0;
 static file_t gTraceFile;
 static uint8_t** gL1PageTable[LEVEL_1_PAGE_TABLE_SIZE];
 
-static  ConcurrentShadowMemoryMl<context_handle_t> sm;
+static ConcurrentShadowMemoryMl<context_handle_t> sm;
 
 
 enum {
@@ -94,10 +97,15 @@ static uint tls_offs;
 #define TLS_SLOT(tls_base, enum_val) (void **)((byte *)(tls_base) + tls_offs + (enum_val))
 #define BUF_PTR(tls_base, type, offs) *(type **)TLS_SLOT(tls_base, offs)
 #define MINSERT instrlist_meta_preinsert
+
 #ifdef ARM_CCTLIB
 #    define OPND_CREATE_CCT_INT OPND_CREATE_INT
 #else
-#    define OPND_CREATE_CCT_INT OPND_CREATE_INT32
+#    ifdef CCTLIB_64
+#        define OPND_CREATE_CCT_INT OPND_CREATE_INT64
+#    else
+#        define OPND_CREATE_CCT_INT OPND_CREATE_INT32
+#    endif
 #endif
 
 typedef struct _mem_ref_t {
@@ -110,11 +118,17 @@ typedef struct op_ref{
     uint32_t opSize;
 }op_ref;
 
+typedef struct reg_ref{
+    uint64_t register_id;
+    uint64_t register_value;
+}reg_ref;
+
 typedef struct _per_thread_t {
     mem_ref_t *cur_buf_list;
     void *cur_buf;
     op_ref opList[MAX_WRITE_OPS_IN_INS];
     //uint64_t opList[MAX_WRITE_OPS_IN_INS];
+    uint32_t regCtxt[REG_NUM];
     uint64_t value[MAX_WRITE_OPS_IN_INS];
     uint64_t bytesWritten;
 } per_thread_t;
@@ -127,10 +141,15 @@ typedef struct RedanduncyData{
 
 void *lock;
 
+//static unordered_map<uint64_t, list<uint64_t>> RegValueMap;
+static unordered_map<uint64_t, unordered_map<reg_id_t, reg_t>> RegisterMap;
+//static unordered_map<uint64_t, reg_ref> RegisterMap;
+
 static unordered_map<uint64_t, uint64_t> RedMap[THREAD_MAX];
 //static unordered_map<int, unordered_map<uint64_t, uint64_t>> RedMap;
 
-static void AddToRedTable(uint64_t key, uint16_t value, int threadID){
+static void 
+AddToRedTable(uint64_t key, uint16_t value, int threadID){
 #ifdef MULTI_THREADED
     //LOCK_RED_MAP();
 #endif
@@ -145,6 +164,7 @@ static void AddToRedTable(uint64_t key, uint16_t value, int threadID){
     //UNLOCK_RED_MAP();
 #endif
 }
+
 
 /*
 template<int start, int end, int incr>
@@ -162,8 +182,7 @@ struct UnrolledLoop<end, end, incr>{
     }
 };*/
 
-
-// for redspy temporal analysis
+// redspy temporal analysis
 template<int start, int end, int incr, bool conditional>
 struct UnrolledLoop{
     static void Body(function<void (const int)> func){
@@ -574,7 +593,7 @@ AfterWrite(void *drcontext, context_handle_t cur_ctxt_hndl, op_ref *opList, int3
 }
 
 void
-InstrumentRegPreWrite(void *drcontext, context_handle_t cur_ctxt_hndl, int32_t num_reg) {
+InstrumentRegPreWrite(void *drcontext, context_handle_t cur_ctxt_hndl, int64_t reg_ip) {
     dr_mcontext_t mc = {sizeof(mc), DR_MC_ALL};
     dr_get_mcontext(drcontext, &mc);
     reg_id_t reg_tmp;
@@ -582,6 +601,11 @@ InstrumentRegPreWrite(void *drcontext, context_handle_t cur_ctxt_hndl, int32_t n
 
 void 
 InstrumentRegPostWrite() {
+    // 
+}
+
+void
+HandlePostWrite(void *drcontext, instrlist_t *ilist, instr_t *where, reg_id_t reg_addr){
     // 
 }
 
@@ -619,15 +643,15 @@ InsertCleancall(int32_t slot, int32_t num, int32_t num_write)
 }
 
 void
-InsertCleancallReg(int32_t slot, int32_t num_reg) {
+InsertCleancallReg(int32_t slot, uint64_t prev_ins) {
     void *drcontext = dr_get_current_drcontext();
     per_thread_t *pt = (per_thread_t *)drmgr_get_tls_field(drcontext, tls_idx);
     context_handle_t cur_ctxt_hndl = drcctlib_get_context_handle(drcontext, slot);
 
     //dr_fprintf(gTraceFile, "reg: %llu\n", mc);
-    for (int i = 0; i < num_reg; i++) {
-        InstrumentRegPreWrite(drcontext, cur_ctxt_hndl, num_reg);
-    }
+    //for (int i = 0; i < 10; i++) {
+        //InstrumentRegPreWrite(drcontext, cur_ctxt_hndl, reg_ip);
+    //}
 }
 
 
@@ -722,7 +746,7 @@ InstrumentInsCallback(void *drcontext, instr_instrument_msg_t *instrument_msg)
     int num = 0;
     //int num_read = 0;
     int num_write = 0;
-    int num_reg = 0;
+    //int num_reg = 0;
     //int op = 0; //read is 0, write is 1
 
     /*for (int i = 0; i < instr_num_srcs(instr); i++) {
@@ -737,21 +761,44 @@ InstrumentInsCallback(void *drcontext, instr_instrument_msg_t *instrument_msg)
     */
 
     // register analysis
+    dr_mcontext_t mc = {sizeof(mc), DR_MC_ALL};
+    dr_get_mcontext(drcontext, &mc);
+    reg_id_t reg_tmp;
+    
+    dr_fprintf(gTraceFile, "******************** instr starts \n");
+    uint64_t cur_ins = (uint64_t)instr_get_app_pc(instr);
+    //dr_fprintf(gTraceFile, "ins ip: %llu\n", reg_ip);
     for (int i = 0; i < instr_num_dsts(instr); i++) {
+        // if op is a register operand
         if (opnd_is_reg(instr_get_dst(instr, i))) {
-            opnd_t reg = instr_get_dst(instr, i);
-            //dr_fprintf(gTraceFile, "is register op\n");
-            num_reg++;
-            //dr_fprintf(gTraceFile, "opnd: %d\n", instr_get_dst(instr, i));
-            //dr_fprintf(gTraceFile, "opnd2: %d\n", reg);
-            reg_id_t reg_id = opnd_get_reg(reg);
-            const char *reg_name = get_register_name(reg_id);
-            //dr_fprintf(gTraceFile, "name is %s\n", reg_name);
-            InstrumentMem(drcontext, bb, instr, instr_get_dst(instr, i));
+            opnd_t op_reg = instr_get_dst(instr, i);
+            reg_id_t reg_id = opnd_get_reg(op_reg);
+            //dr_fprintf(gTraceFile, "reg_id = %llu\n", reg_id);
+            // const char *reg_name = get_register_name(reg_id);
+            if (reg_is_gpr(reg_id)) {
+                reg_t reg_value = reg_get_value(reg_id, &mc);
+                //dr_fprintf(gTraceFile, "current value in register: %llu\n", reg_value);
+                if (prev_ins != 0) {
+                    // add register info to the map
+                    unordered_map<uint64_t, unordered_map<reg_id_t, reg_t>>::iterator it = RegisterMap.find(prev_ins);
+                    if (it == RegisterMap.end()) {
+                        unordered_map<reg_id_t, reg_t> tmp;
+                        RegisterMap[prev_ins] = tmp;   
+                    }
+                    RegisterMap[prev_ins][reg_id] = reg_value;
+                    //if (RegValueMap[prev_ins].find(reg_id) == RegValueMap[prev_ins].end()) {
+                        //RegValueMap[prev_ins][reg_id] = reg_value;
+                    //}   
+                }
+            }
         }
     }
+    //dr_fprintf(gTraceFile, "current ins = %llu\n", cur_ins);
+    //dr_fprintf(gTraceFile, "pre ins = %llu\n", prev_ins);
+    prev_ins = cur_ins;
+    
     dr_insert_clean_call(drcontext, bb, instr, (void *)InsertCleancallReg, false, 2,
-                         OPND_CREATE_CCT_INT(slot), OPND_CREATE_CCT_INT(num_reg));
+                         OPND_CREATE_CCT_INT(slot), OPND_CREATE_CCT_INT(prev_ins));
 
     for (int i = 0; i < instr_num_dsts(instr); i++) {
         if (opnd_is_memory_reference(instr_get_dst(instr, i))) { //dst = write
