@@ -39,6 +39,7 @@ static int memOp_num;
 static uint64_t prev_ins = 0;
 static uint64_t cur_ins = 0;
 static uint32_t regSize;
+static uint32_t regID;
 
 // __thread bool Sample_flag = true;
 // __thread long long NUM_INS = 0;
@@ -613,23 +614,24 @@ InsertCleancall(int32_t slot, int32_t num, int32_t num_write)
 }
 
 void
-InsertCleancallReg(int32_t slot, uint64_t prev_ins, uint64_t cur_ins, uint32_t regSize) {
+InsertCleancallReg(int32_t slot, uint64_t prev_ins, uint64_t cur_ins, uint32_t regSize, uint32_t regID) {
     void *drcontext = dr_get_current_drcontext();
     per_thread_t *pt = (per_thread_t *)drmgr_get_tls_field(drcontext, tls_idx);
     context_handle_t cur_ctxt_hndl = drcctlib_get_context_handle(drcontext, slot);
 
+    int threadID = drcctlib_get_thread_id();
     dr_fprintf(gTraceFile, "prev ins = %llu\n", prev_ins);
     dr_fprintf(gTraceFile, "current ins = %llu\n", cur_ins);
     //dr_fprintf(gTraceFile, "next ins = %llu\n", next_ins);
     //dr_fprintf(gTraceFile, "reg id: %llu\n", reg_id);
-    dr_fprintf(gTraceFile, "regSize = %llu\n", regSize);
+    //dr_fprintf(gTraceFile, "regSize = %llu\n", regSize);
 
     if (RegisterMap[cur_ins] == RegisterMap[prev_ins]) {
-        //dr_fprintf(gTraceFile, "equal\n");
-        //AddToRedTable(MAKE_CONTEXT_PAIR(regCtxt[reg], cur_ctxt_hndl), regSize, threadID);
+        //dr_fprintf(gTraceFile, "is equal\n");
+        AddToRedTable(MAKE_CONTEXT_PAIR(pt->regCtxt[regID], cur_ctxt_hndl), regSize, threadID);
     } else {
         // TODO
-        //pt->regCtxt[reg] = cur_ctxt_hndl;
+        pt->regCtxt[regID] = cur_ctxt_hndl;
     }
 
 }
@@ -760,6 +762,7 @@ InstrumentInsCallback(void *drcontext, instr_instrument_msg_t *instrument_msg)
         if (opnd_is_reg(instr_get_dst(instr, i))) {
             opnd_t op_reg = instr_get_dst(instr, i);
             reg_id = (uint64_t)opnd_get_reg(op_reg);
+            regID = reg_id;
             regSize = (uint64_t)reg_get_bits(reg_id);
             dr_fprintf(gTraceFile, "reg id = %lu\n", reg_id);
             dr_fprintf(gTraceFile, "reg size = %lu\n", regSize);
@@ -791,8 +794,8 @@ InstrumentInsCallback(void *drcontext, instr_instrument_msg_t *instrument_msg)
     //prev_ins = cur_ins;
     //cur_ins = next_ins;
 
-    dr_insert_clean_call(drcontext, bb, instr, (void *)InsertCleancallReg, false, 4,
-                         OPND_CREATE_CCT_INT(slot), OPND_CREATE_CCT_INT(prev_ins), OPND_CREATE_CCT_INT(cur_ins), OPND_CREATE_CCT_INT(regSize));                    
+    dr_insert_clean_call(drcontext, bb, instr, (void *)InsertCleancallReg, false, 5,
+                         OPND_CREATE_CCT_INT(slot), OPND_CREATE_CCT_INT(prev_ins), OPND_CREATE_CCT_INT(cur_ins), OPND_CREATE_CCT_INT(regSize), OPND_CREATE_CCT_INT(regID));                    
     prev_ins = cur_ins;
     cur_ins = next_ins;
 
