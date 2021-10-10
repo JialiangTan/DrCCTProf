@@ -16,7 +16,6 @@
 #include <functional>
 #include <vector>
 #include <algorithm>
-#include <list>
 
 #include "dr_api.h"
 #include "drmgr.h"
@@ -35,11 +34,12 @@ using namespace std;
 
 static int tls_idx;
 static int memOp_num; 
-// static int zero = 0;
-static uint64_t prev_ins = 0;
-static uint64_t cur_ins = 0;
-static uint32_t regSize;
+// for register analysis
+static uint64_t prev_ins;
+static uint64_t cur_ins;
 static uint32_t regID;
+static uint32_t regSize;
+static int regOp_num;
 
 // __thread bool Sample_flag = true;
 // __thread long long NUM_INS = 0;
@@ -52,7 +52,7 @@ thread_local long long NUM_INS = 0;
 #define MAX_WRITE_OP_LENGTH (512)
 #define MAX_WRITE_OPS_IN_INS (8)
 #define THREAD_MAX (1024)
-#define REG_NUM 10
+#define REG_MAX (100)
 
 /* infrastructure for shadow memory */
 /* MACROs */
@@ -87,7 +87,6 @@ thread_local long long NUM_INS = 0;
 
 static file_t gTraceFile;
 static uint8_t** gL1PageTable[LEVEL_1_PAGE_TABLE_SIZE];
-
 static ConcurrentShadowMemoryMl<context_handle_t> sm;
 
 
@@ -122,7 +121,9 @@ typedef struct op_ref{
 }op_ref;
 
 typedef struct reg_ref{
+    uint64_t ins_ip;
     uint64_t register_id;
+    uint32_t register_size;
     uint64_t register_value;
 }reg_ref;
 
@@ -131,7 +132,8 @@ typedef struct _per_thread_t {
     void *cur_buf;
     op_ref opList[MAX_WRITE_OPS_IN_INS];
     //uint64_t opList[MAX_WRITE_OPS_IN_INS];
-    uint32_t regCtxt[REG_NUM];
+    reg_ref regInfo[REG_MAX];
+    unordered_map<uint64_t, reg_ref> RegInfoMap;
     uint64_t value[MAX_WRITE_OPS_IN_INS];
     uint64_t bytesWritten;
 } per_thread_t;
@@ -144,14 +146,11 @@ typedef struct RedanduncyData{
 
 void *lock;
 
-//static unordered_map<uint64_t, unordered_map<reg_id_t, reg_t>> RegisterMap;
 static unordered_map<uint64_t, unordered_map<uint64_t, uint64_t>> RegisterMap;
-
 static unordered_map<uint64_t, uint64_t> RedMap[THREAD_MAX];
 //static unordered_map<int, unordered_map<uint64_t, uint64_t>> RedMap;
 
-static void 
-AddToRedTable(uint64_t key, uint16_t value, int threadID){
+static void AddToRedTable(uint64_t key, uint16_t value, int threadID){
 #ifdef MULTI_THREADED
     //LOCK_RED_MAP();
 #endif
@@ -167,8 +166,6 @@ AddToRedTable(uint64_t key, uint16_t value, int threadID){
 #endif
 }
 
-
-/*
 template<int start, int end, int incr>
 struct UnrolledLoop{
     static void Body(function<void (const int)> func){
@@ -182,51 +179,12 @@ struct UnrolledLoop<end, end, incr>{
     static void Body(function<void (const int)> func){
         // empty body
     }
-};*/
-
-// redspy temporal analysis
-template<int start, int end, int incr, bool conditional>
-struct UnrolledLoop{
-    static void Body(function<void (const int)> func){
-        func(start); // Real loop body
-        UnrolledLoop<start+incr, end, incr, conditional>::Body(func); // unroll next iteration
-    }
-    static void BodySamePage(context_handle_t *prevIP, const context_handle_t handle, int threadID){
-        if(conditional){
-            AddToRedTable(MAKE_CONTEXT_PAIR(prevIP[start], handle), 1, threadID);
-        }
-        // update context
-        prevIP[start] = handle;
-        UnrolledLoop<start+incr, end, incr, conditional>::BodySamePage(prevIP, handle, threadID); // unroll next iteration
-    }
-    static void BodyStraddlePage(uint64_t addr, const context_handle_t handle, int threadID){
-        uint8_t *status = (uint8_t *) get<0>(sm.GetOrCreateShadowBaseAddress((uint64_t)addr + start));
-        context_handle_t *prevIP = (context_handle_t*)(status + PAGE_OFFSET(((uint64_t)addr + start)) * sizeof(context_handle_t));
-        if (conditional) {
-            // add to RedTable
-            AddToRedTable(MAKE_CONTEXT_PAIR(prevIP[0], handle), 1, threadID);
-        }
-        // update context
-        prevIP[0] = handle;
-        UnrolledLoop<start+incr, end, incr, conditional>::BodyStraddlePage(addr, handle, threadID); // unroll the next iteration
-    }
 };
-
-template<int end, int incr, bool conditional>
-struct UnrolledLoop<end, end, incr, conditional>{
-    static void Body(function<void (const int)> func){}
-    static void BodySamePage(context_handle_t *prevIP, const context_handle_t handle, int threadID){}
-    static void BodyStraddlePage(uint64_t addr, const context_handle_t handle, int threadID){}
-};
-
 
 template<int start, int end, int incr>
 struct UnrolledConjunction{
     static bool Body(function<bool (const int)> func){
         return func(start) && UnrolledConjunction<start+incr, end, incr>::Body(func); // unroll next iteration
-    }
-    static bool BodyContextCheck(context_handle_t *prevIP){
-        return (prevIP[0] == prevIP[start]) && UnrolledConjunction<start+incr, end, incr>::BodyContextCheck(prevIP); // unroll next iteration
     }
 };
 
@@ -235,12 +193,8 @@ struct UnrolledConjunction<end, end, incr>{
     static bool Body(function<void (const int)> func){
         return true;
     }
-    static bool BodyContextCheck(context_handle_t *prevIP){
-        return true;
-    }
 };
 
-/*
 // helper functions for shadow memory
 static uint8_t* GetOrCreateShadowBaseAddress(uint64_t addr){
     uint8_t *shadowPage;
@@ -254,7 +208,6 @@ static uint8_t* GetOrCreateShadowBaseAddress(uint64_t addr){
     }
     return shadowPage;
 }
-*/
 
 template<uint16_t AccessLen, uint32_t bufferOffset>
 struct RedSpyAnalysis{
@@ -339,7 +292,6 @@ struct RedSpyAnalysis{
                 if (!dr_safe_read(opAddr, 4, &temp4, NULL))
                     return;
                 if (*((uint32_t *)(&(pt->value[memOp]))) == temp4){
-                    //dr_fprintf(gTraceFile, "in case 4, equal\n");
                     isRedundantWrite = true;
                 }
                 break;
@@ -357,51 +309,16 @@ struct RedSpyAnalysis{
             //default:
                 //break;
         }
-        uint8_t *status = (uint8_t *) get<0>(sm.GetOrCreateShadowBaseAddress((uint64_t)opAddr));
-        //uint8_t *status = GetOrCreateShadowBaseAddress((uint64_t)opAddr);
+        uint8_t *status = GetOrCreateShadowBaseAddress((uint64_t)opAddr);
+        //uint8_t *status = (uint8_t *) get<0>(sm.GetOrCreateShadowBaseAddress((uint64_t)opAddr));
         int threadID = drcctlib_get_thread_id();
         context_handle_t *prevIP = (context_handle_t*)(status + PAGE_OFFSET((uint64_t)opAddr) * sizeof(context_handle_t));
         bool isAccessWithinPageBoundary = IS_ACCESS_WITHIN_PAGE_BOUNDARY((uint64_t)opAddr, AccessLen);
         if (isRedundantWrite) {
-            if (isAccessWithinPageBoundary) {
-                // all from the same context?
-                if (UnrolledConjunction<0, AccessLen, 1>::BodyContextCheck(prevIP)) {
-                    // add to redtable
-                    AddToRedTable(MAKE_CONTEXT_PAIR(prevIP[0], cur_ctxt_hndl), AccessLen, threadID);
-                    // update conxt
-                    UnrolledLoop<0, AccessLen, 1, true>::BodySamePage(prevIP, cur_ctxt_hndl, threadID);
-                } else {
-                    // different contexts
-                    UnrolledLoop<0, AccessLen, 1, true>::BodySamePage(prevIP, cur_ctxt_hndl, threadID);
-                }
-            } else {
-                // write across a 64k page boundary
-                // first byte is on this page though
-                AddToRedTable(MAKE_CONTEXT_PAIR(prevIP[0], cur_ctxt_hndl), 1, threadID);
-                // update contexts
-                prevIP[0] = cur_ctxt_hndl;
-                // remaining bytes (from 1 to AccessLen) across a 64k page boundary
-                UnrolledLoop<1, AccessLen, 1, true>::BodyStraddlePage((uint64_t)opAddr, cur_ctxt_hndl, threadID);
-            }
-        } else {
-            // No redundancy, just update contexts
-            if (isAccessWithinPageBoundary) {
-                // update context
-                UnrolledLoop<0, AccessLen, 1, false>::BodySamePage(prevIP, cur_ctxt_hndl, threadID);
-            } else {
-                // write across 64k page boundary
-                // update context
-                prevIP[0] = cur_ctxt_hndl;
-                // remaining bytes (from 1 to AccessLen) somewhere acoss a 64k page boundary
-                UnrolledLoop<1, AccessLen, 1, false>::BodyStraddlePage((uint64_t)opAddr, cur_ctxt_hndl, threadID);
-            }
-        }
-        /*if (isRedundantWrite) {
             // redundancy detected
             if(isAccessWithinPageBoundary){
                 // All from the same context ?
                 if (UnrolledConjunction<0, AccessLen, 1>::Body( [&] (int index) -> bool {return (prevIP[index] == prevIP[0]); } )) {
-                //if (UnrolledConjunction<0, AccessLen, 1>::BodyContextCheck(prevIP)) {
                     // repory to RedTable
                     AddToRedTable(MAKE_CONTEXT_PAIR(prevIP[0], cur_ctxt_hndl), AccessLen, threadID);
                     // update context
@@ -427,6 +344,7 @@ struct RedSpyAnalysis{
                 // remaining bytes (from 1 to AccessLen) across a 64k page boundary
                 UnrolledLoop<1, AccessLen, 1>::Body( [&] (int index) -> void {
                     status = GetOrCreateShadowBaseAddress((uint64_t)opAddr + index);
+                    //status = get<0>(sm.GetOrCreateShadowBaseAddress((uint64_t)opAddr + index));
                     prevIP = (context_handle_t*)(status + PAGE_OFFSET(((uint64_t)opAddr + index)) * sizeof(context_handle_t));
                     // report in RedTable
                     AddToRedTable(MAKE_CONTEXT_PAIR(prevIP[0], cur_ctxt_hndl), 1, threadID);
@@ -446,12 +364,13 @@ struct RedSpyAnalysis{
                 // write across a 64k page boundary
                 UnrolledLoop<0, AccessLen, 1>::Body( [&] (int index) -> void {
                     status = GetOrCreateShadowBaseAddress((uint64_t)opAddr + index);
+                    //status = get<0>(sm.GetOrCreateShadowBaseAddress((uint64_t)opAddr + index))
                     prevIP = (context_handle_t*)(status + PAGE_OFFSET(((uint64_t)opAddr + index)) * sizeof(context_handle_t));
                     // update context
                     prevIP[0] = cur_ctxt_hndl;
                 });
             }
-        }*/
+        }
     }
 };
 
@@ -517,6 +436,7 @@ struct RedSpyInstrument{
     }
 };
 
+
 // client want to do
 void
 BeforeWrite(void *drcontext, context_handle_t cur_ctxt_hndl, mem_ref_t *ref, int32_t num, int32_t num_write)
@@ -547,8 +467,6 @@ BeforeWrite(void *drcontext, context_handle_t cur_ctxt_hndl, mem_ref_t *ref, int
         // use next slot for the next write operand
         readBufferSlotIndex++;   
     }
-    // register analysis
-    // instrument register writes to find redundancy
 }
 
 void
@@ -587,20 +505,16 @@ InsertCleancall(int32_t slot, int32_t num, int32_t num_write)
     void *drcontext = dr_get_current_drcontext();
     per_thread_t *pt = (per_thread_t *)drmgr_get_tls_field(drcontext, tls_idx);
     context_handle_t cur_ctxt_hndl = drcctlib_get_context_handle(drcontext, slot);
-    
-    // implement two callbacks
-    // 2. get the values in addrs after the write
+    // change the order of for loop and if condition
     for (int i = 0; i < memOp_num; i++){
         if(pt->opList[i].opAddr != 0) {
             AfterWrite(drcontext, cur_ctxt_hndl, &pt->opList[i], num, num_write);
         }
     }
-    
-    // 1. get the values in addrs before the write 
     for (int i = 0; i < num; i++) {
         if (pt->cur_buf_list[i].addr != 0) {
             // store the addr and size of ops in opList
-            // check the values in addr after ins execution 
+            // check the values in addr after running ins
             pt->opList[i].opAddr = (uint64_t*)((&pt->cur_buf_list[i])->addr);
             pt->opList[i].opSize = (uint32_t)((&pt->cur_buf_list[i])->size);
             BeforeWrite(drcontext, cur_ctxt_hndl, &pt->cur_buf_list[i], num, num_write);
@@ -614,28 +528,88 @@ InsertCleancall(int32_t slot, int32_t num, int32_t num_write)
 }
 
 void
-InsertCleancallReg(int32_t slot, uint64_t prev_ins, uint64_t cur_ins, uint32_t regSize, uint32_t regID) {
+InsertCleancallReg(int32_t slot, int num_reg, uint64_t cur_ins, uint32_t regSize, uint32_t regID) {
     void *drcontext = dr_get_current_drcontext();
     per_thread_t *pt = (per_thread_t *)drmgr_get_tls_field(drcontext, tls_idx);
     context_handle_t cur_ctxt_hndl = drcctlib_get_context_handle(drcontext, slot);
+    dr_mcontext_t mc = {sizeof(mc), DR_MC_ALL};
+    dr_get_mcontext(drcontext, &mc);
 
-    int threadID = drcctlib_get_thread_id();
-    dr_fprintf(gTraceFile, "prev ins = %llu\n", prev_ins);
-    dr_fprintf(gTraceFile, "current ins = %llu\n", cur_ins);
-    //dr_fprintf(gTraceFile, "next ins = %llu\n", next_ins);
-    //dr_fprintf(gTraceFile, "reg id: %llu\n", reg_id);
-    //dr_fprintf(gTraceFile, "regSize = %llu\n", regSize);
+    //int threadID = drcctlib_get_thread_id();
+    if (num_reg != 0) {
+        dr_fprintf(gTraceFile, "reg size = %lu\n", regSize);
+        dr_fprintf(gTraceFile, "reg id = %lu\n", regID);
+        dr_fprintf(gTraceFile, "num_reg = %d\n", num_reg);
+    }
+    for (int i = 0; i < regOp_num; i++) {
+        if (pt->regInfo[i].register_value != 0) {
+            
+            if (regSize == 4) {
+                uint32_t reg_value = (uint32_t)reg_get_value(regID, &mc);
+                if (pt->regInfo[i].register_value == reg_value) {
+                    dr_fprintf(gTraceFile, "value equal\n");
+                }
+            }
 
+            if (regID == pt->regInfo[i].register_id) {
+                dr_fprintf(gTraceFile, "id equal\n");
+                
+                
+                /*if (regSize == 4) {
+                    if ((uint32_t)reg_get_value(regID, &mc) == pt->regInfo[i].register_value) {
+                        dr_fprintf(gTraceFile, "4: equal\n");
+                        // Add to RedMap
+                    } else {
+                        // update ctxt
+                    }
+                }
+                if (regSize == 8) {
+                    if (reg_get_value(regID, &mc) == pt->regInfo[i].register_value) {
+                        dr_fprintf(gTraceFile, "8: equal\n");
+                        // Add to RedMap
+                    } else {
+                        // update ctxt
+                    }
+                }*/
+            }
+
+            
+            
+        }
+    }
+
+    for (int i = 0; i < num_reg; i++) {
+        // store reg info in RegisterMap
+        if (regSize == 4) {
+            uint32_t reg_value = (uint32_t)reg_get_value(regID, &mc);
+            //dr_fprintf(gTraceFile, "4: register value is: %lu\n", reg_value);
+            //RegisterMap[prev_ins][regID] = reg_value;
+            //dr_fprintf(gTraceFile, "Print Map: %lu\n", RegisterMap[prev_ins][regID]);
+            pt->regInfo[i].register_value = reg_value;
+            pt->regInfo[i].register_id = regID;
+            //pt->regInfo[i].ins_ip = cur_ins;
+        } else {
+            uint64_t reg_value = reg_get_value(regID, &mc);
+            //dr_fprintf(gTraceFile, "8: register value is: %llu\n", reg_value);
+            //RegisterMap[prev_ins][regID] = reg_value;
+            //dr_fprintf(gTraceFile, "Print Map: %llu\n", RegisterMap[prev_ins][regID]);
+            pt->regInfo[i].register_value = reg_value;
+            pt->regInfo[i].register_id = regID;
+        }
+    }
+    regOp_num = num_reg;
+    
+    prev_ins = cur_ins;
+
+    /*
     if (RegisterMap[cur_ins] == RegisterMap[prev_ins]) {
         //dr_fprintf(gTraceFile, "is equal\n");
         AddToRedTable(MAKE_CONTEXT_PAIR(pt->regCtxt[regID], cur_ctxt_hndl), regSize, threadID);
     } else {
         // TODO
         pt->regCtxt[regID] = cur_ctxt_hndl;
-    }
-
+    }*/
 }
-
 
 // insert
 static void
@@ -726,78 +700,35 @@ InstrumentInsCallback(void *drcontext, instr_instrument_msg_t *instrument_msg)
 #endif
 
     int num = 0;
-    //int num_read = 0;
     int num_write = 0;
-    //int num_reg = 0;
-    //int op = 0; //read is 0, write is 1
-
-    /*
-    for (int i = 0; i < instr_num_srcs(instr); i++) {
-        if (opnd_is_memory_reference(instr_get_src(instr, i))) { //src = read
-            num++;
-            num_read++;
-            InstrumentMem(drcontext, bb, instr, instr_get_src(instr, i));
-        }
-    }
-    dr_insert_clean_call(drcontext, bb, instr, (void *)InsertCleancall, false, 5,
-                         OPND_CREATE_CCT_INT(slot), OPND_CREATE_CCT_INT(num), OPND_CREATE_CCT_INT(num_read), OPND_CREATE_CCT_INT(num_write), OPND_CREATE_CCT_INT(op));
-    */
+    int num_reg = 0;
 
     // register analysis
-    dr_mcontext_t mc = {sizeof(mc), DR_MC_ALL};
-    dr_get_mcontext(drcontext, &mc);
-    
     dr_fprintf(gTraceFile, "******************** instr starts \n");
-    uint64_t next_ins = (uint64_t)instr_get_app_pc(instr);
-
+    cur_ins = (uint64_t)instr_get_app_pc(instr);
+    dr_fprintf(gTraceFile, "cur ins = %llu\n", cur_ins);
     //dr_fprintf(gTraceFile, "prev ins = %llu\n", prev_ins);
-    //dr_fprintf(gTraceFile, "current ins = %llu\n", cur_ins);
-    dr_fprintf(gTraceFile, "ins in callback = %llu\n", next_ins);
-    uint32_t reg_id;
-    uint64_t reg_value;
-    
     //dr_fprintf(gTraceFile, "ins ip: %llu\n", reg_ip);
     for (int i = 0; i < instr_num_dsts(instr); i++) {
         // if op is a register operand
         if (opnd_is_reg(instr_get_dst(instr, i))) {
+            num_reg++;
             opnd_t op_reg = instr_get_dst(instr, i);
-            reg_id = (uint64_t)opnd_get_reg(op_reg);
+            uint32_t reg_id = (uint64_t)opnd_get_reg(op_reg);
             regID = reg_id;
-            regSize = (uint64_t)reg_get_bits(reg_id);
-            dr_fprintf(gTraceFile, "reg id = %lu\n", reg_id);
+            regSize = (uint32_t)reg_get_bits(reg_id);
+            //dr_fprintf(gTraceFile, "reg id = %lu\n", reg_id);
             dr_fprintf(gTraceFile, "reg size = %lu\n", regSize);
             // const char *reg_name = get_register_name(reg_id);
             if (reg_is_gpr(reg_id)) {
-                reg_value = (uint64_t)reg_get_value(reg_id, &mc);
-                //dr_fprintf(gTraceFile, "current value in register: %llu\n", reg_value);
-                if (cur_ins != 0) {
-                    unordered_map<uint64_t, unordered_map<uint64_t, uint64_t>>::iterator it = RegisterMap.find(cur_ins);
-                    if (it == RegisterMap.end()) {
-                        unordered_map<uint64_t, uint64_t> tmp;
-                        RegisterMap[cur_ins] = tmp;   
-                    } else {
-                        // TODO: is it okay to rewrite?
-                        // if ins ip exists, rewrite
-                        // because the existing value has been compared
-                    }
-                    RegisterMap[cur_ins][reg_id] = reg_value;
-                    //if (RegValueMap[cur_ins].find(reg_id) == RegValueMap[cur_ins].end()) {
-                        //RegValueMap[cur_ins][reg_id] = reg_value;
-                    //}   
-                }
+                // 
             }
         }
     }
-    //dr_fprintf(gTraceFile, "current ins = %llu\n", next_ins);
-    //dr_fprintf(gTraceFile, "pre ins = %llu\n", cur_ins);
-
-    //prev_ins = cur_ins;
-    //cur_ins = next_ins;
-
     dr_insert_clean_call(drcontext, bb, instr, (void *)InsertCleancallReg, false, 5,
-                         OPND_CREATE_CCT_INT(slot), OPND_CREATE_CCT_INT(prev_ins), OPND_CREATE_CCT_INT(cur_ins), OPND_CREATE_CCT_INT(regSize), OPND_CREATE_CCT_INT(regID));                    
-    prev_ins = cur_ins;
-    cur_ins = next_ins;
+                         OPND_CREATE_CCT_INT(slot), OPND_CREATE_CCT_INT(num_reg), OPND_CREATE_CCT_INT(cur_ins), OPND_CREATE_CCT_INT(regSize), OPND_CREATE_CCT_INT(regID));                    
+    //prev_ins = cur_ins;
+
 
     for (int i = 0; i < instr_num_dsts(instr); i++) {
         if (opnd_is_memory_reference(instr_get_dst(instr, i))) { //dst = write
@@ -828,10 +759,10 @@ void PrintRedundancyPairs(void * drcontext,int threadID) {
     uint64_t grandTotalRedundantBytes = 0;
     dr_fprintf(gTraceFile, "********** Dump Data from Thread %d **********\n", threadID);
     for (unordered_map<uint64_t, uint64_t>::iterator it = RedMap[threadID].begin(); it != RedMap[threadID].end(); it++) {
-        dr_fprintf(gTraceFile, "key in map = %llu\n", (*it).first);
+        //dr_fprintf(gTraceFile, "key in map = %llu\n", (*it).first);
         context_handle_t dead = DECODE_DEAD((*it).first);
         context_handle_t kill = DECODE_KILL((*it).first);
-        dr_fprintf(gTraceFile, "dead data: %lu, and kill data: %lu\n", dead, kill);
+        //dr_fprintf(gTraceFile, "dead data: %lu, and kill data: %lu\n", dead, kill);
 
         for (tmpIt = tmpList.begin(); tmpIt != tmpList.end(); tmpIt++) {
             bool ct1 = false;
@@ -918,7 +849,7 @@ static void
 ClientInit(int argc, const char *argv[])
 {
     char name[MAXIMUM_PATH] = "";
-    DRCCTLIB_INIT_LOG_FILE_NAME(name, "test", "out");
+    DRCCTLIB_INIT_LOG_FILE_NAME(name, "redtemp", "out");
     gTraceFile = dr_open_file(name, DR_FILE_WRITE_OVERWRITE | DR_FILE_ALLOW_LARGE);
     DR_ASSERT(gTraceFile != INVALID_FILE);
     dr_fprintf(gTraceFile, "ClientInit\n");
