@@ -132,10 +132,11 @@ typedef struct _per_thread_t {
     void *cur_buf;
     op_ref opList[MAX_WRITE_OPS_IN_INS];
     //uint64_t opList[MAX_WRITE_OPS_IN_INS];
-    reg_ref regInfo[REG_MAX];
-    unordered_map<uint64_t, reg_ref> RegInfoMap;
     uint64_t value[MAX_WRITE_OPS_IN_INS];
     uint64_t bytesWritten;
+    // for register analysis
+    reg_ref regInfo[REG_MAX];
+    uint32_t regCtxt[REG_MAX];
 } per_thread_t;
 
 typedef struct RedanduncyData{
@@ -534,8 +535,8 @@ InsertCleancallReg(int32_t slot, int num_reg, uint64_t cur_ins, uint32_t regSize
     context_handle_t cur_ctxt_hndl = drcctlib_get_context_handle(drcontext, slot);
     dr_mcontext_t mc = {sizeof(mc), DR_MC_ALL};
     dr_get_mcontext(drcontext, &mc);
-
-    //int threadID = drcctlib_get_thread_id();
+    int threadID = drcctlib_get_thread_id();
+    
     if (num_reg != 0) {
         dr_fprintf(gTraceFile, "reg size = %lu\n", regSize);
         dr_fprintf(gTraceFile, "reg id = %lu\n", regID);
@@ -543,65 +544,57 @@ InsertCleancallReg(int32_t slot, int num_reg, uint64_t cur_ins, uint32_t regSize
     }
     for (int i = 0; i < regOp_num; i++) {
         if (pt->regInfo[i].register_value != 0) {
-            
-            if (regSize == 4) {
-                uint32_t reg_value = (uint32_t)reg_get_value(regID, &mc);
-                if (pt->regInfo[i].register_value == reg_value) {
-                    dr_fprintf(gTraceFile, "value equal\n");
-                }
-            }
-
+            // if same register
             if (regID == pt->regInfo[i].register_id) {
-                dr_fprintf(gTraceFile, "id equal\n");
-                
-                
-                /*if (regSize == 4) {
+                // if same value in register
+                if (regSize == 4) {
                     if ((uint32_t)reg_get_value(regID, &mc) == pt->regInfo[i].register_value) {
-                        dr_fprintf(gTraceFile, "4: equal\n");
-                        // Add to RedMap
+                        uint32_t tmp = pt->regInfo[i].register_value;
+                        dr_fprintf(gTraceFile, "4 bytes register has equal value = %lu\n", tmp);
+                        AddToRedTable(MAKE_CONTEXT_PAIR(pt->regCtxt[regID], cur_ctxt_hndl), regSize, threadID);
                     } else {
-                        // update ctxt
+                        // update context
+                        pt->regCtxt[regID] = cur_ctxt_hndl;
                     }
                 }
                 if (regSize == 8) {
-                    if (reg_get_value(regID, &mc) == pt->regInfo[i].register_value) {
-                        dr_fprintf(gTraceFile, "8: equal\n");
-                        // Add to RedMap
+                    if ((uint64_t)reg_get_value(regID, &mc) == pt->regInfo[i].register_value) {
+                        dr_fprintf(gTraceFile, "8 bytes register has equal value = %llu\n", (uint64_t)reg_get_value(regID, &mc));
+                        AddToRedTable(MAKE_CONTEXT_PAIR(pt->regCtxt[regID], cur_ctxt_hndl), regSize, threadID);
                     } else {
-                        // update ctxt
+                        // update context
+                        pt->regCtxt[regID] = cur_ctxt_hndl;
                     }
-                }*/
+                } 
+            } else {
+                // update context
+                pt->regCtxt[regID] = cur_ctxt_hndl;
             }
-
-            
-            
         }
     }
 
     for (int i = 0; i < num_reg; i++) {
         // store reg info in RegisterMap
         if (regSize == 4) {
-            uint32_t reg_value = (uint32_t)reg_get_value(regID, &mc);
+            //uint32_t reg_value = (uint32_t)reg_get_value(regID, &mc);
             //dr_fprintf(gTraceFile, "4: register value is: %lu\n", reg_value);
             //RegisterMap[prev_ins][regID] = reg_value;
             //dr_fprintf(gTraceFile, "Print Map: %lu\n", RegisterMap[prev_ins][regID]);
-            pt->regInfo[i].register_value = reg_value;
             pt->regInfo[i].register_id = regID;
+            pt->regInfo[i].register_value = (uint32_t)reg_get_value(regID, &mc);
             //pt->regInfo[i].ins_ip = cur_ins;
         } else {
-            uint64_t reg_value = reg_get_value(regID, &mc);
+            //uint64_t reg_value = reg_get_value(regID, &mc);
             //dr_fprintf(gTraceFile, "8: register value is: %llu\n", reg_value);
             //RegisterMap[prev_ins][regID] = reg_value;
             //dr_fprintf(gTraceFile, "Print Map: %llu\n", RegisterMap[prev_ins][regID]);
-            pt->regInfo[i].register_value = reg_value;
             pt->regInfo[i].register_id = regID;
+            pt->regInfo[i].register_value = (uint64_t)reg_get_value(regID, &mc);
+            
         }
     }
     regOp_num = num_reg;
-    
-    prev_ins = cur_ins;
-
-    /*
+    /*prev_ins = cur_ins;
     if (RegisterMap[cur_ins] == RegisterMap[prev_ins]) {
         //dr_fprintf(gTraceFile, "is equal\n");
         AddToRedTable(MAKE_CONTEXT_PAIR(pt->regCtxt[regID], cur_ctxt_hndl), regSize, threadID);
@@ -721,13 +714,14 @@ InstrumentInsCallback(void *drcontext, instr_instrument_msg_t *instrument_msg)
             dr_fprintf(gTraceFile, "reg size = %lu\n", regSize);
             // const char *reg_name = get_register_name(reg_id);
             if (reg_is_gpr(reg_id)) {
-                // 
+                dr_fprintf(gTraceFile, "is general register\n");
+            } else {
+                dr_fprintf(gTraceFile, "is not general register\n");
             }
         }
     }
     dr_insert_clean_call(drcontext, bb, instr, (void *)InsertCleancallReg, false, 5,
-                         OPND_CREATE_CCT_INT(slot), OPND_CREATE_CCT_INT(num_reg), OPND_CREATE_CCT_INT(cur_ins), OPND_CREATE_CCT_INT(regSize), OPND_CREATE_CCT_INT(regID));                    
-    //prev_ins = cur_ins;
+                         OPND_CREATE_CCT_INT(slot), OPND_CREATE_CCT_INT(num_reg), OPND_CREATE_CCT_INT(cur_ins), OPND_CREATE_CCT_INT(regSize), OPND_CREATE_CCT_INT(regID));
 
 
     for (int i = 0; i < instr_num_dsts(instr); i++) {
