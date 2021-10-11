@@ -536,6 +536,11 @@ InsertCleancallReg(int32_t slot, int num_reg, uint32_t regSize, uint32_t regID) 
     dr_mcontext_t mc = {sizeof(mc), DR_MC_ALL};
     dr_get_mcontext(drcontext, &mc);
     int threadID = drcctlib_get_thread_id();
+
+    // only monitor general registers
+    if (!reg_is_gpr(regID)) {
+        return;
+    }
     /*
     if (num_reg != 0) {
         dr_fprintf(gTraceFile, "reg size = %lu\n", regSize);
@@ -546,7 +551,7 @@ InsertCleancallReg(int32_t slot, int num_reg, uint32_t regSize, uint32_t regID) 
         if (pt->regInfo[i].register_value != 0) {
             // if same register
             if (regID == pt->regInfo[i].register_id) {
-                // if same value in register
+                // if same value
                 if (regSize == 4) {
                     if ((uint32_t)reg_get_value(regID, &mc) == pt->regInfo[i].register_value) {
                         //uint32_t tmp = pt->regInfo[i].register_value;
@@ -574,7 +579,7 @@ InsertCleancallReg(int32_t slot, int num_reg, uint32_t regSize, uint32_t regID) 
     }
 
     for (int i = 0; i < num_reg; i++) {
-        // store reg info in RegisterMap
+        // store reg info in regInfo
         pt->regInfo[i].register_id = regID;
         if (regSize == 4) {
             pt->regInfo[i].register_value = (uint32_t)reg_get_value(regID, &mc);
@@ -688,19 +693,14 @@ InstrumentInsCallback(void *drcontext, instr_instrument_msg_t *instrument_msg)
     // register analysis
     //dr_fprintf(gTraceFile, "******************** instr starts \n");
     //cur_ins = (uint64_t)instr_get_app_pc(instr);
-    //dr_fprintf(gTraceFile, "cur ins = %llu\n", cur_ins);
-    //dr_fprintf(gTraceFile, "prev ins = %llu\n", prev_ins);
-    //dr_fprintf(gTraceFile, "ins ip: %llu\n", reg_ip);
     for (int i = 0; i < instr_num_dsts(instr); i++) {
         // if op is a register op
         if (opnd_is_reg(instr_get_dst(instr, i))) {
             num_reg++;
             opnd_t op_reg = instr_get_dst(instr, i);
             uint32_t reg_id = (uint64_t)opnd_get_reg(op_reg);
-            if (reg_is_gpr(reg_id)) {
-                regSize = (uint32_t)reg_get_bits(reg_id);
-                regID = reg_id;
-            } 
+            regSize = (uint32_t)reg_get_bits(reg_id);
+            regID = reg_id;
         }
     }
     dr_insert_clean_call(drcontext, bb, instr, (void *)InsertCleancallReg, false, 4,
@@ -711,7 +711,6 @@ InstrumentInsCallback(void *drcontext, instr_instrument_msg_t *instrument_msg)
         if (opnd_is_memory_reference(instr_get_dst(instr, i))) { //dst = write
             num++;
             num_write++;
-            //op = 1;
             InstrumentMem(drcontext, bb, instr, instr_get_dst(instr, i));
         }
     }
