@@ -33,7 +33,7 @@ using namespace std;
                                           ##_ARGS)
 
 static int tls_idx;
-static int memOp_num; 
+static int memOp_num = 0; 
 // for register analysis
 static uint64_t prev_ins;
 static uint64_t cur_ins;
@@ -210,9 +210,10 @@ static uint8_t* GetOrCreateShadowBaseAddress(uint64_t addr){
     return shadowPage;
 }
 
+
 template<uint16_t AccessLen, uint32_t bufferOffset>
-struct RedSpyAnalysis{
-    static void RecordNByteValueBeforeWrite(void *addr, void* drcontext, uint32_t memOp){
+struct LoadSpyAnalysis{
+    static void RecordNByteValueBeforeLoad(void *addr, void* drcontext, uint32_t memOp){
         if(Sample_flag){
             NUM_INS++;
             if(NUM_INS > WINDOW_ENABLE){
@@ -256,6 +257,7 @@ struct RedSpyAnalysis{
                 if (!dr_safe_read(addr, 8, &temp8, NULL))
                     return;
                 *((uint64_t *)(&(pt->value[memOp]))) = temp8;
+                //dr_fprintf(gTraceFile, "before load: 8 bytes load value = %llu\n", temp8);
                 break;
             //default:
                 //TODO 
@@ -263,7 +265,7 @@ struct RedSpyAnalysis{
         }
     }
     
-    static void CheckNByteValueAfterWrite(void* opAddr, void* drcontext, context_handle_t cur_ctxt_hndl, uint32_t memOp){
+    static void CheckNByteValueAfterLoad(void* opAddr, void* drcontext, context_handle_t cur_ctxt_hndl, int32_t memOp){
         if(!Sample_flag){
             return;
         }
@@ -304,7 +306,10 @@ struct RedSpyAnalysis{
                     return;
                 if (*((uint64_t *)(&(pt->value[memOp]))) == temp8){
                     isRedundantWrite = true;
-                }
+                    //dr_fprintf(gTraceFile, "after load: 8 bytes load value = %llu\n", temp8);
+                } //else {
+                    //dr_fprintf(gTraceFile, "not equal\n");
+                //}
                 break;
             }
             //default:
@@ -375,59 +380,61 @@ struct RedSpyAnalysis{
     }
 };
 
-template<uint32_t readBufferSlotIndex>
-struct RedSpyInstrument{
-    static void InstrumentValueBeforeWriting(void *drcontext, context_handle_t cur_ctxt_hndl, mem_ref_t *ref, uint32_t memOp){
+template<int32_t readBufferSlotIndex>
+struct LoadSpyInstrument{
+    static void InstrumentValueBeforeLoad(void *drcontext, context_handle_t cur_ctxt_hndl, mem_ref_t *ref, int32_t memOp){
         // get address and size of memOp
         void *addr = ref->addr;
         uint32_t refSize = ref->size;
+        
         switch(refSize) {
-            case 1:
-                RedSpyAnalysis<1, readBufferSlotIndex>::RecordNByteValueBeforeWrite(addr, drcontext, memOp);
+            case 1:{
+                LoadSpyAnalysis<1, readBufferSlotIndex>::RecordNByteValueBeforeLoad(addr, drcontext, memOp);
                 break;
+            }
             case 2:
-                RedSpyAnalysis<2, readBufferSlotIndex>::RecordNByteValueBeforeWrite(addr, drcontext, memOp);
+                LoadSpyAnalysis<2, readBufferSlotIndex>::RecordNByteValueBeforeLoad(addr, drcontext, memOp);
                 break;
             case 4:
-                RedSpyAnalysis<4, readBufferSlotIndex>::RecordNByteValueBeforeWrite(addr, drcontext, memOp);
+                LoadSpyAnalysis<4, readBufferSlotIndex>::RecordNByteValueBeforeLoad(addr, drcontext, memOp);
                 break;
             case 8:
-                RedSpyAnalysis<8, readBufferSlotIndex>::RecordNByteValueBeforeWrite(addr, drcontext, memOp);
+                LoadSpyAnalysis<8, readBufferSlotIndex>::RecordNByteValueBeforeLoad(addr, drcontext, memOp);
                 break;
             case 10:
-                RedSpyAnalysis<10, readBufferSlotIndex>::RecordNByteValueBeforeWrite(addr, drcontext, memOp);
+                LoadSpyAnalysis<10, readBufferSlotIndex>::RecordNByteValueBeforeLoad(addr, drcontext, memOp);
                 break;
             case 16:
-                RedSpyAnalysis<16, readBufferSlotIndex>::RecordNByteValueBeforeWrite(addr, drcontext, memOp);
+                LoadSpyAnalysis<16, readBufferSlotIndex>::RecordNByteValueBeforeLoad(addr, drcontext, memOp);
                 break;
             default:
                 // TODO
                 // RecordValueBeforeLargeWrite();
                 break;
         }
-
     }
-    static void InstrumentValueAfterWriting(void *drcontext, context_handle_t cur_ctxt_hndl, op_ref *opList, uint32_t memOp){
+
+    static void InstrumentValueAfterLoad(void *drcontext, context_handle_t cur_ctxt_hndl, op_ref *opList, int32_t memOp){
         void *opAddr = opList->opAddr;
         uint32_t opSize = opList->opSize;
         switch(opSize) {
             case 1:
-                RedSpyAnalysis<1, readBufferSlotIndex>::CheckNByteValueAfterWrite(opAddr, drcontext, cur_ctxt_hndl, memOp);
+                LoadSpyAnalysis<1, readBufferSlotIndex>::CheckNByteValueAfterLoad(opAddr, drcontext, cur_ctxt_hndl, memOp);
                 break;
             case 2:
-                RedSpyAnalysis<2, readBufferSlotIndex>::CheckNByteValueAfterWrite(opAddr, drcontext, cur_ctxt_hndl, memOp);
+                LoadSpyAnalysis<2, readBufferSlotIndex>::CheckNByteValueAfterLoad(opAddr, drcontext, cur_ctxt_hndl, memOp);
                 break;
             case 4:
-                RedSpyAnalysis<4, readBufferSlotIndex>::CheckNByteValueAfterWrite(opAddr, drcontext, cur_ctxt_hndl, memOp);
+                LoadSpyAnalysis<4, readBufferSlotIndex>::CheckNByteValueAfterLoad(opAddr, drcontext, cur_ctxt_hndl, memOp);
                 break;
             case 8:
-                RedSpyAnalysis<8, readBufferSlotIndex>::CheckNByteValueAfterWrite(opAddr, drcontext,  cur_ctxt_hndl, memOp);
+                LoadSpyAnalysis<8, readBufferSlotIndex>::CheckNByteValueAfterLoad(opAddr, drcontext,  cur_ctxt_hndl, memOp);
                 break;
             case 10:
-                RedSpyAnalysis<10, readBufferSlotIndex>::CheckNByteValueAfterWrite(opAddr, drcontext, cur_ctxt_hndl, memOp);
+                LoadSpyAnalysis<10, readBufferSlotIndex>::CheckNByteValueAfterLoad(opAddr, drcontext, cur_ctxt_hndl, memOp);
                 break;
             case 16:
-                RedSpyAnalysis<16, readBufferSlotIndex>::CheckNByteValueAfterWrite(opAddr, drcontext, cur_ctxt_hndl, memOp);
+                LoadSpyAnalysis<16, readBufferSlotIndex>::CheckNByteValueAfterLoad(opAddr, drcontext, cur_ctxt_hndl, memOp);
                 break;
             default:
                 // TODO
@@ -438,6 +445,7 @@ struct RedSpyInstrument{
 };
 
 
+/*
 // client want to do
 void
 BeforeWrite(void *drcontext, context_handle_t cur_ctxt_hndl, mem_ref_t *ref, int32_t num, int32_t num_write)
@@ -468,8 +476,45 @@ BeforeWrite(void *drcontext, context_handle_t cur_ctxt_hndl, mem_ref_t *ref, int
         // use next slot for the next write operand
         readBufferSlotIndex++;   
     }
+}*/
+
+void
+BeforeLoad(void *drcontext, context_handle_t cur_ctxt_hndl, mem_ref_t *ref, int num) {
+    int readBufferSlotIndex = 0;
+    for (int32_t memOp = 0; memOp < num; memOp++) {
+        switch (readBufferSlotIndex) {
+            case 0: {
+                // read the value at location before execution
+                LoadSpyInstrument<0>::InstrumentValueBeforeLoad(drcontext, cur_ctxt_hndl, ref, memOp);
+                break;
+            }
+            case 1: {
+                LoadSpyInstrument<1>::InstrumentValueBeforeLoad(drcontext, cur_ctxt_hndl, ref, memOp);
+                break;
+            }
+            case 2: {
+                LoadSpyInstrument<2>::InstrumentValueBeforeLoad(drcontext, cur_ctxt_hndl, ref, memOp);
+                break;
+            }
+            case 3: {
+                LoadSpyInstrument<3>::InstrumentValueBeforeLoad(drcontext, cur_ctxt_hndl, ref, memOp);
+                break;
+            }
+            case 4: {
+                LoadSpyInstrument<4>::InstrumentValueBeforeLoad(drcontext, cur_ctxt_hndl, ref, memOp);
+                break;
+            }
+            default: {
+                // assert (0 && "NYI");
+                break;
+            }
+        }
+        // use next slot for the next load op
+        readBufferSlotIndex++;
+    }
 }
 
+/*
 void
 AfterWrite(void *drcontext, context_handle_t cur_ctxt_hndl, op_ref *opList, int32_t num, int32_t num_write){
     int readBufferSlotIndex = 0;
@@ -498,27 +543,66 @@ AfterWrite(void *drcontext, context_handle_t cur_ctxt_hndl, op_ref *opList, int3
         readBufferSlotIndex++;
     }
 }
+*/
+
+void
+AfterLoad(void *drcontext, context_handle_t cur_ctxt_hndl, op_ref *opList, int memOp_num) {
+    int readBufferSlotIndex = 0;
+    for (int32_t memOp = 0; memOp < memOp_num; memOp++) {
+        // read the value at location after execution
+        switch (readBufferSlotIndex) {
+            case 0: {
+                LoadSpyInstrument<0>::InstrumentValueAfterLoad(drcontext, cur_ctxt_hndl, opList, memOp);
+                break;
+            }
+            case 1: {
+                LoadSpyInstrument<1>::InstrumentValueAfterLoad(drcontext, cur_ctxt_hndl, opList, memOp);
+                break;
+            }
+            case 2: {
+                LoadSpyInstrument<2>::InstrumentValueAfterLoad(drcontext, cur_ctxt_hndl, opList, memOp);
+                break;
+            }
+            case 3: {
+                LoadSpyInstrument<3>::InstrumentValueAfterLoad(drcontext, cur_ctxt_hndl, opList, memOp);
+                break;
+            }
+            case 4: {
+                LoadSpyInstrument<4>::InstrumentValueAfterLoad(drcontext, cur_ctxt_hndl, opList, memOp);
+                break;
+            }
+            default: {
+                // assert (0 && "NYI");
+                break;
+            }
+        }
+        readBufferSlotIndex++;
+    }
+}
 
 // dr clean call
 void
-InsertCleancall(int32_t slot, int32_t num, int32_t num_write)
+InsertCleancall(int32_t slot, int32_t num)
 {
     void *drcontext = dr_get_current_drcontext();
     per_thread_t *pt = (per_thread_t *)drmgr_get_tls_field(drcontext, tls_idx);
     context_handle_t cur_ctxt_hndl = drcctlib_get_context_handle(drcontext, slot);
-    // change the order of for loop and if condition
-    for (int i = 0; i < memOp_num; i++){
+    
+    for (int i = 0; i < memOp_num; i++) {
         if(pt->opList[i].opAddr != 0) {
-            AfterWrite(drcontext, cur_ctxt_hndl, &pt->opList[i], num, num_write);
+            // compare load value
+            // after ins execution
+            AfterLoad(drcontext, cur_ctxt_hndl, &pt->opList[i], memOp_num);
         }
     }
+
     for (int i = 0; i < num; i++) {
         if (pt->cur_buf_list[i].addr != 0) {
-            // store the addr and size of ops in opList
-            // check the values in addr after running ins
+            // store the addr and size of ops in opList 
+            // before ins execution
             pt->opList[i].opAddr = (uint64_t*)((&pt->cur_buf_list[i])->addr);
             pt->opList[i].opSize = (uint32_t)((&pt->cur_buf_list[i])->size);
-            BeforeWrite(drcontext, cur_ctxt_hndl, &pt->cur_buf_list[i], num, num_write);
+            BeforeLoad(drcontext, cur_ctxt_hndl, &pt->cur_buf_list[i], num);
         } else {
             pt->opList[i].opAddr = 0;
             pt->opList[i].opSize = 0;
@@ -528,6 +612,7 @@ InsertCleancall(int32_t slot, int32_t num, int32_t num_write)
     BUF_PTR(pt->cur_buf, mem_ref_t, INSTRACE_TLS_OFFS_BUF_PTR) = pt->cur_buf_list;
 }
 
+/*
 void
 InsertCleancallReg(int32_t slot, int num_reg, uint32_t regSize, uint32_t regID) {
     void *drcontext = dr_get_current_drcontext();
@@ -536,17 +621,17 @@ InsertCleancallReg(int32_t slot, int num_reg, uint32_t regSize, uint32_t regID) 
     dr_mcontext_t mc = {sizeof(mc), DR_MC_ALL};
     dr_get_mcontext(drcontext, &mc);
     int threadID = drcctlib_get_thread_id();
-    /*
-    if (num_reg != 0) {
-        dr_fprintf(gTraceFile, "reg size = %lu\n", regSize);
-        dr_fprintf(gTraceFile, "reg id = %lu\n", regID);
-        dr_fprintf(gTraceFile, "num_reg = %d\n", num_reg);
-    }*/
+
+    // only monitor general registers
+    if (!reg_is_gpr(regID)) {
+        return;
+    }
+
     for (int i = 0; i < regOp_num; i++) {
         if (pt->regInfo[i].register_value != 0) {
             // if same register
             if (regID == pt->regInfo[i].register_id) {
-                // if same value in register
+                // if same value
                 if (regSize == 4) {
                     if ((uint32_t)reg_get_value(regID, &mc) == pt->regInfo[i].register_value) {
                         //uint32_t tmp = pt->regInfo[i].register_value;
@@ -574,7 +659,7 @@ InsertCleancallReg(int32_t slot, int num_reg, uint32_t regSize, uint32_t regID) 
     }
 
     for (int i = 0; i < num_reg; i++) {
-        // store reg info in RegisterMap
+        // store reg info in regInfo
         pt->regInfo[i].register_id = regID;
         if (regSize == 4) {
             pt->regInfo[i].register_value = (uint32_t)reg_get_value(regID, &mc);
@@ -583,15 +668,7 @@ InsertCleancallReg(int32_t slot, int num_reg, uint32_t regSize, uint32_t regID) 
         }
     }
     regOp_num = num_reg;
-    /*prev_ins = cur_ins;
-    if (RegisterMap[cur_ins] == RegisterMap[prev_ins]) {
-        //dr_fprintf(gTraceFile, "is equal\n");
-        AddToRedTable(MAKE_CONTEXT_PAIR(pt->regCtxt[regID], cur_ctxt_hndl), regSize, threadID);
-    } else {
-        // TODO
-        pt->regCtxt[regID] = cur_ctxt_hndl;
-    }*/
-}
+}*/
 
 // insert
 static void
@@ -682,37 +759,33 @@ InstrumentInsCallback(void *drcontext, instr_instrument_msg_t *instrument_msg)
 #endif
 
     int num = 0;
-    int num_write = 0;
+    // int num_write = 0;
+    int num_read = 0;
     int num_reg = 0;
 
+    /*
     // register analysis
     //dr_fprintf(gTraceFile, "******************** instr starts \n");
     //cur_ins = (uint64_t)instr_get_app_pc(instr);
-    //dr_fprintf(gTraceFile, "cur ins = %llu\n", cur_ins);
-    //dr_fprintf(gTraceFile, "prev ins = %llu\n", prev_ins);
-    //dr_fprintf(gTraceFile, "ins ip: %llu\n", reg_ip);
     for (int i = 0; i < instr_num_dsts(instr); i++) {
         // if op is a register op
         if (opnd_is_reg(instr_get_dst(instr, i))) {
             num_reg++;
             opnd_t op_reg = instr_get_dst(instr, i);
             uint32_t reg_id = (uint64_t)opnd_get_reg(op_reg);
-            if (reg_is_gpr(reg_id)) {
-                regSize = (uint32_t)reg_get_bits(reg_id);
-                regID = reg_id;
-            } 
+            regSize = (uint32_t)reg_get_bits(reg_id);
+            regID = reg_id;
         }
     }
     dr_insert_clean_call(drcontext, bb, instr, (void *)InsertCleancallReg, false, 4,
                          OPND_CREATE_CCT_INT(slot), OPND_CREATE_CCT_INT(num_reg), OPND_CREATE_CCT_INT(regSize), OPND_CREATE_CCT_INT(regID));
+    */
 
-
-    for (int i = 0; i < instr_num_dsts(instr); i++) {
-        if (opnd_is_memory_reference(instr_get_dst(instr, i))) { //dst = write
+    for (int i = 0; i < instr_num_srcs(instr); i++) {
+        if (opnd_is_memory_reference(instr_get_src(instr, i))) { //src = read
             num++;
-            num_write++;
-            //op = 1;
-            InstrumentMem(drcontext, bb, instr, instr_get_dst(instr, i));
+            num_read++;
+            InstrumentMem(drcontext, bb, instr, instr_get_src(instr, i));
         }
     }
 #ifdef x86_CCTLIB
@@ -720,9 +793,11 @@ InstrumentInsCallback(void *drcontext, instr_instrument_msg_t *instrument_msg)
         DRCCTLIB_EXIT_PROCESS("drreg_unreserve_aflags != DRREG_SUCCESS");
     }
 #endif
-
-    dr_insert_clean_call(drcontext, bb, instr, (void *)InsertCleancall, false, 3,
-                         OPND_CREATE_CCT_INT(slot), OPND_CREATE_CCT_INT(num), OPND_CREATE_CCT_INT(num_write));
+    if (num != num_read) {
+        dr_fprintf(gTraceFile, "not equal\n");
+    }
+    dr_insert_clean_call(drcontext, bb, instr, (void *)InsertCleancall, false, 2,
+                         OPND_CREATE_CCT_INT(slot), OPND_CREATE_CCT_INT(num));
 }
 
 
@@ -733,8 +808,10 @@ static bool RedundancyCompare(const struct RedanduncyData &first, const struct R
 void PrintRedundancyPairs(void * drcontext,int threadID) {
     vector<RedanduncyData> tmpList;
     vector<RedanduncyData>::iterator tmpIt;
+
     uint64_t grandTotalRedundantBytes = 0;
     dr_fprintf(gTraceFile, "********** Dump Data from Thread %d **********\n", threadID);
+    
     for (unordered_map<uint64_t, uint64_t>::iterator it = RedMap[threadID].begin(); it != RedMap[threadID].end(); it++) {
         //dr_fprintf(gTraceFile, "key in map = %llu\n", (*it).first);
         context_handle_t dead = DECODE_DEAD((*it).first);
@@ -789,6 +866,7 @@ void PrintRedundancyPairs(void * drcontext,int threadID) {
     }
 }
 
+
 static void
 ClientThreadStart(void *drcontext)
 {
@@ -826,7 +904,7 @@ static void
 ClientInit(int argc, const char *argv[])
 {
     char name[MAXIMUM_PATH] = "";
-    DRCCTLIB_INIT_LOG_FILE_NAME(name, "redtemp", "out");
+    DRCCTLIB_INIT_LOG_FILE_NAME(name, "load", "out");
     gTraceFile = dr_open_file(name, DR_FILE_WRITE_OVERWRITE | DR_FILE_ALLOW_LARGE);
     DR_ASSERT(gTraceFile != INVALID_FILE);
     dr_fprintf(gTraceFile, "ClientInit\n");
@@ -863,7 +941,7 @@ ClientExit(void)
 bool
 CustomFilter(instr_t *instr)
 {
-    return (instr_writes_memory(instr));
+    return (instr_reads_memory(instr));
 }
 
 
